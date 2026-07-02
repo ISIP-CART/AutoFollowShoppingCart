@@ -68,6 +68,158 @@
 - 任何扩展到 SLAM、复杂规划、服务器或树莓派主脑的建议，都必须先说明为什么首版需要它。
 - 当补充 README、设计文档或计划材料时，优先写“课程可交付原型”视角，而不是商业产品宣传视角。
 
+## Git 提交与推送流程
+
+本项目已经有固定的 Git 协作约定，详细版见 `CONTRIBUTING.md`。下面这份流程面向 GitHub 新手，默认目标是：**把你在主仓库中的更改提交并推送到一个新的分支**。
+
+### 1. 先确认你现在在哪个仓库
+
+本项目有两个层次：
+
+- **主仓库**：当前这个仓库，用来放 `README.md`、`design/`、`AGENTS.md`、`CONTRIBUTING.md` 等课程文档，以及 `dev/OpenBot` 的子模块指针。
+- **子仓库 `dev/OpenBot`**：团队的 OpenBot fork。如果你改的是 OpenBot Android / firmware 代码，提交流程和主仓库不一样。
+
+如果你这次改的是文档、采购记录、设计分析、测试记录等内容，通常都在**主仓库**提交。
+
+### 2. 日常开发不要直接在 `master` 上提交
+
+开始工作前，先同步主分支，再从主分支切出你自己的新分支：
+
+```bash
+git switch master
+git pull
+git switch -c your-branch-name
+```
+
+分支命名建议：
+
+- 文档：`docs/xxx`
+- 采购：`docs/procurement-xxx`
+- 测试：`test/xxx`
+- Android：`android/xxx`
+- 固件：`firmware/xxx`
+
+示例：
+
+```bash
+git switch -c docs/update-motor-params
+```
+
+### 3. 在主仓库提交你改过的文件
+
+先查看改动：
+
+```bash
+git status
+```
+
+如果你改的是主仓库里的文档，可以按需添加文件，例如：
+
+```bash
+git add AGENTS.md CONTRIBUTING.md README.md design/
+```
+
+然后提交：
+
+```bash
+git commit -m "Update project documentation"
+```
+
+提交说明建议写清楚这次改了什么，例如：
+
+- `Update motor parameter documentation`
+- `Add git workflow guide for beginners`
+- `Revise procurement notes for encoder wiring`
+
+### 4. 把新分支推送到 GitHub
+
+第一次把这个新分支推到远端时，执行：
+
+```bash
+git push -u origin your-branch-name
+```
+
+示例：
+
+```bash
+git push -u origin docs/update-motor-params
+```
+
+其中：
+
+- `origin` 是远端仓库名
+- `your-branch-name` 是你刚创建的新分支名
+- `-u` 的作用是把本地分支和远端分支关联起来，后面你再推送时可以直接用 `git push`
+
+### 5. 以后继续在这个分支上更新
+
+如果你已经推送过一次，后面继续修改后通常只需要：
+
+```bash
+git status
+git add 你改过的文件
+git commit -m "Describe your update"
+git push
+```
+
+### 6. 如果你改的是 `dev/OpenBot`
+
+如果你改的是 `dev/OpenBot/android` 或 `dev/OpenBot` 里的 firmware，不要只在主仓库提交。正确顺序是：
+
+1. 先进入 `dev/OpenBot`
+2. 在 `dev/OpenBot` 里提交并 push 代码
+3. 回到主仓库
+4. 再提交主仓库里更新后的 `dev/OpenBot` 子模块指针
+
+示例流程：
+
+```bash
+cd dev/OpenBot
+git switch shopping-cart-dev
+git pull
+git status
+git add android/你改过的文件
+git commit -m "Adapt OpenBot Android app for shopping cart"
+git push
+```
+
+然后回到主仓库：
+
+```bash
+cd ..
+git status
+git add dev/OpenBot
+git commit -m "Update OpenBot submodule"
+git push
+```
+
+注意：**不要把 `dev/OpenBot` 的源码直接复制进主仓库提交**。主仓库只记录它当前指向的 commit。
+
+### 7. 提交前自检
+
+每次提交前至少检查这几件事：
+
+- `git status` 里没有误加临时文件、构建产物、下载文件或本地工具配置
+- 你当前不在 `master` 上做日常开发
+- 如果改了 OpenBot 代码，是否已经先在 `dev/OpenBot` 提交
+- 如果只改文档，是否只提交了主仓库相关文件
+
+### 8. 你现在这类需求的推荐做法
+
+如果你像现在这样，已经在主仓库改了文档，想**提交并推送到一个新的分支**，最标准的命令顺序就是：
+
+```bash
+git switch master
+git pull
+git switch -c docs/your-branch-name
+git status
+git add AGENTS.md README.md design/
+git commit -m "Describe your change"
+git push -u origin docs/your-branch-name
+```
+
+如果不确定自己该提交哪些文件，先运行 `git status`，确认后再 `git add`。
+
 ## 当前仓库状态提示
 
 当前仓库以文档规划为主，代码与硬件实现尚未整理入库。后续若引入代码、固件、BOM、测试记录，应继续遵守上面的架构主线和冲突确认规则。
