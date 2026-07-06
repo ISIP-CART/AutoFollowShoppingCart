@@ -2,6 +2,13 @@
 
 `tools/reid_pc_test/` is the team's shared PC-side ReID research workspace.
 
+Current status:
+
+- The latest ReID experiment notes are in `docs/ReID调研测试迭代记录与下一步计划.md`.
+- The current first-version direction is `osnet_x0_25 + diverse confirmedGallery(k=8)`.
+- ReID margin is useful as identity evidence, but must not be used alone to recover `FOLLOW` when the target may be absent.
+- Android-side runtime integration is still pending; the next engineering step is to connect ReID outputs to `TargetMemory`, `TargetMatcher`, and `FollowStateMachine`.
+
 What should be kept in Git:
 
 - our own analysis scripts
