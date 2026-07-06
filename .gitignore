@@ -6,3 +6,14 @@ Thumbs.db
 print/
 outputs/
 opencode.json
+
+# ReID research workspace: keep code/docs, never upload private/raw assets
+tools/reid_pc_test/images/
+tools/reid_pc_test/outputs/
+tools/reid_pc_test/weights/
+tools/reid_pc_test/deep-person-reid/build/
+tools/reid_pc_test/deep-person-reid/*.egg-info/
+tools/reid_pc_test/deep-person-reid/torchreid/metrics/rank_cylib/rank_cy.c
+tools/reid_pc_test/**/__pycache__/
+tools/reid_pc_test/**/*.pyc
+tools/reid_pc_test/**/*.pyd
