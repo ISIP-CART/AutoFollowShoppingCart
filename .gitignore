@@ -3,7 +3,8 @@
 .tmp-gh-config/
 Thumbs.db
 *.log
-
+print/
+outputs/
 opencode.json
 
 # ReID research workspace: keep code/docs, never upload private/raw assets
