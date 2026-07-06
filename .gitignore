@@ -3,5 +3,6 @@
 .tmp-gh-config/
 Thumbs.db
 *.log
-
+print/
+outputs/
 opencode.json
