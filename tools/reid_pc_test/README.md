@@ -9,6 +9,7 @@ model: osnet_x0_25
 weight: osnet_x0_25_market1501.pth
 gallery: diverse confirmedGallery(k=8)
 role: ReID 作为身份置信度辅助，不作为独立身份判决器
+current focus: 真实 sequence 回放暴露“恢复过保守”，下一步设计 LOCAL_SEARCH / REACQUIRE 主动找人策略
 ```
 
 最新结论与下一步计划见：
@@ -92,6 +93,9 @@ identity,session_id,out_path,src_path,frame_id,timestamp_ms,bbox_left,...
 | `simulate_target_follow_v1.py` | 当前可用 | 目标跟随候选模拟。构造 target-present 和 target-absent 场景，评估 margin 阈值下的误接受风险。 |
 | `simulate_target_follow_v2.py` | 当前可用 | `best_score + margin` 双阈值网格评估。回答“best_score 是否能降低目标缺席 false accept”。 |
 | `simulate_target_follow_with_bbox_v1.py` | 当前可用 | bbox 单步门控评估。回答“ReID + bbox 连续性是否比 ReID only 更安全”。 |
+| `simulate_state_machine_replay_v1.py` | 当前可用 | 初版状态机回放。把 bbox gate rows 串成证据流，检查是否会错误恢复 `FOLLOW`、过度 STOP 或长时间不确定。 |
+| `simulate_chronological_session_replay_v1.py` | 当前可用 | 按真实 session 时间顺序回放。用同一人的前若干帧建 gallery，后续帧连续作为 probe，并支持人工缺失段和干扰者插入。 |
+| `simulate_sequence_session_replay_v1.py` | 当前可用 | 回放 Android `PersonSequenceCollector` 采集的真实时序数据。读取 `frame_log.csv`、`detections.csv`、`events.csv` 和 crop，评估真实无人帧、多检测框、人工事件下的 ReID + bbox + 状态机行为。 |
 | `collect_diverse_gallery_images.py` | 辅助工具 | 根据特征多样性挑选 gallery 图片，便于人工检查 confirmedGallery 候选。 |
 | `analyze_identity_pairs.py` | 辅助工具 | 分析身份对之间的相似度分布，定位最容易混淆的身份组合。 |
 | `inspect_hard_pairs.py` | 辅助工具 | 检查 hard pairs / fail cases，帮助人工查看高相似误匹配样本。 |
@@ -225,6 +229,129 @@ python simulate_target_follow_with_bbox_v1.py ^
 - 验证 bbox 连续性是否能作为 ReID false accept 的安全刹车。
 - 当前观察：`strong + strict + center_area` 能将 absent false accept 从约 `0.09` 压到约 `0.05`，但也会降低 true accept。
 
+### 6. 状态机回放
+
+```powershell
+python simulate_state_machine_replay_v1.py ^
+  --rows outputs\openbot_follow_x025_g8_d2_bboxgate_pred_bbox_gate_rows.csv ^
+  --output-prefix openbot_follow_x025_g8_d2_state_replay
+```
+
+较宽松 timeout 对照：
+
+```powershell
+python simulate_state_machine_replay_v1.py ^
+  --rows outputs\openbot_follow_x025_g8_d2_bboxgate_pred_bbox_gate_rows.csv ^
+  --output-prefix openbot_follow_x025_g8_d2_state_replay_tuned ^
+  --identity-timeout 20 ^
+  --search-timeout 20
+```
+
+用途：
+
+- 回放 `FOLLOW_CONFIDENT / FOLLOW_CAUTION / REACQUIRE_TARGET / LOST_SEARCH / IDENTITY_UNCERTAIN / STOP`。
+- 检查目标缺席时是否会错误恢复 `FOLLOW`。
+- 检查目标存在时是否过度进入 `STOP`。
+- 注意：当前输入 rows 来自随机抽样模拟，不是真实连续视频轨迹，因此 `over_stop_rate` 更适合作为压力测试信号，不能直接等同真实跟随表现。
+
+### 7. 连续 session 时间顺序回放
+
+```powershell
+python simulate_chronological_session_replay_v1.py ^
+  --images images_openbot_clean ^
+  --manifest images_openbot_clean\dataset_manifest.csv ^
+  --model osnet_x0_25 ^
+  --weight weights\osnet_x0_25_market1501.pth ^
+  --identity ysy ^
+  --session-id ysy-1_20260706_161110 ^
+  --gallery-k 8 ^
+  --gap 1 ^
+  --distractors 2 ^
+  --output-prefix openbot_chrono_ysy_continuous
+```
+
+人工目标缺失 + 干扰者插入：
+
+```powershell
+python simulate_chronological_session_replay_v1.py ^
+  --images images_openbot_clean ^
+  --manifest images_openbot_clean\dataset_manifest.csv ^
+  --model osnet_x0_25 ^
+  --weight weights\osnet_x0_25_market1501.pth ^
+  --identity ysy ^
+  --session-id ysy-1_20260706_161110 ^
+  --gallery-k 8 ^
+  --gap 1 ^
+  --distractors 2 ^
+  --missing-ranges 20:35 ^
+  --distractor-identity yrc ^
+  --distractor-session-id yrc-1_20260706_161319 ^
+  --distractor-ranges 20:35 ^
+  --output-prefix openbot_chrono_ysy_missing_yrc
+```
+
+用途：
+
+- 用真实 session 的 `timestamp_ms / frame_id` 顺序替代随机抽样 rows。
+- 验证连续目标存在时是否还能稳定保持 `FOLLOW_CONFIDENT / FOLLOW_CAUTION`。
+- 验证人工缺失段和插入干扰者时是否会错误恢复 `FOLLOW`。
+- 为后续 Android `PersonSequenceCollector / SEQUENCE` 数据格式提供 PC 侧回放入口。
+
+### 8. Android sequence 真实时序回放
+
+基础命令：
+
+```powershell
+python simulate_sequence_session_replay_v1.py ^
+  --sequence images\yrc2_seq_20260707_152237 ^
+  --identity yrc2 ^
+  --model osnet_x0_25 ^
+  --weight weights\osnet_x0_25_market1501.pth ^
+  --gallery-seconds 5 ^
+  --gallery-k 8 ^
+  --event-tolerance-ms 1000 ^
+  --identity-timeout 20 ^
+  --search-timeout 20 ^
+  --output-prefix yrc2_seq_152237_replay_t1000_id20
+```
+
+更接近真实控制循环的无人帧推进版本：
+
+```powershell
+python simulate_sequence_session_replay_v1.py ^
+  --sequence images\yrc2_seq_20260707_152237 ^
+  --identity yrc2 ^
+  --model osnet_x0_25 ^
+  --weight weights\osnet_x0_25_market1501.pth ^
+  --gallery-seconds 5 ^
+  --gallery-k 8 ^
+  --event-tolerance-ms 1000 ^
+  --identity-timeout 60 ^
+  --search-timeout 60 ^
+  --missing-frame-policy advance_empty ^
+  --uncertain-recover-frames 2 ^
+  --reacquire-strict-frames 1 ^
+  --reacquire-default-frames 2 ^
+  --lost-recover-frames 3 ^
+  --output-prefix yrc2_seq_152237_advance_empty_recover_soft_a
+```
+
+用途：
+
+- 直接读取 `PersonSequenceCollector` 导出的真实序列目录。
+- 用前若干秒单人稳定 crop 自动构建 gallery。
+- 将 `target_left/target_return`、`distractor_enter/distractor_leave`、`occlusion_start/occlusion_end` 展开成分析窗口。
+- 对每个有 crop 的采样帧执行 ReID 打分、bbox 连续性计算和状态机回放。
+- 输出额外的 `_diagnostic_summary.csv`，把 `pre_stop` 和 `at_or_post_stop` 分开，避免把终态 `STOP` 后的尾段误读成算法一直过度停车。
+- `--missing-frame-policy advance_empty` 会让 `num_persons=0` 的无人帧推进 `LOST_SEARCH / STOP` 计时，更接近真实 Android 控制循环；默认 `hold` 主要用于和旧结果对照。
+
+当前真实 sequence 结论：
+
+- `yrc_seq_20260707_140056`：安全性成立，没有目标缺席时错误恢复 `FOLLOW`；高 over-stop 主要来自终态 `STOP` 后尾段。
+- `yrc2_seq_20260707_152237`：流程更清晰，包含目标离开、无人帧、返回、干扰者、遮挡；暴露出“目标返回后看到了人，但恢复条件过严，容易卡在 `IDENTITY_UNCERTAIN` 后 STOP”的问题。
+- 加入 `advance_empty` 后，无人帧会更真实地推进搜索超时；这说明后续不能只调大 timeout，还要设计更主动的 `LOCAL_SEARCH / REACQUIRE` 恢复路径。
+- 宽松恢复条件对照中，`stop_count=0`、`over_stop_rate=0`、`final_state=FOLLOW_CAUTION`，且 `wrong_recovery_count=0`。这说明“安全前提下更主动恢复”是可行方向。
+
 ## 输出文件命名
 
 所有脚本默认输出到 `outputs/`。常见文件包括：
@@ -244,6 +371,15 @@ python simulate_target_follow_with_bbox_v1.py ^
 | `_bbox_gate_summary.csv` | bbox gate 汇总结果。 |
 | `_bbox_gate_rows.csv` | bbox gate 逐样本明细。 |
 | `_bbox_reject_reasons.csv` | bbox gate 拒绝原因统计。 |
+| `_state_replay_summary.csv` | 状态机回放汇总，包含 wrong follow recovery、over stop、uncertain duration 等。 |
+| `_state_replay_transitions.csv` | 状态机转换明细。 |
+| `_state_replay_frame_rows.csv` | 状态机逐帧回放明细。 |
+| `_chronological_summary.csv` | 连续 session 回放汇总，包含 wrong follow、over stop、uncertain、reacquire 等。 |
+| `_chronological_transitions.csv` | 连续 session 中的状态转换明细。 |
+| `_chronological_frame_rows.csv` | 连续 session 逐帧回放明细。 |
+| `_data_quality.csv` | sequence replay 数据质量检查，包含 frame/detection/event/crop 数量和缺失 crop 统计。 |
+| `_diagnostic_summary.csv` | sequence replay 分段诊断，包含 `all_reid`、`pre_stop`、`at_or_post_stop` 和 `post_stop_only`。 |
+| `_summary.csv` / `_transitions.csv` / `_frame_rows.csv` | sequence replay 的汇总、状态转换和逐帧明细；文件名前缀由 `--output-prefix` 决定。 |
 
 ## 结果解读口径
 
@@ -269,13 +405,19 @@ target-absent:
 
 工程上宁可进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN / STOP`，也不能在目标缺席时仅凭 ReID 恢复 `FOLLOW`。
 
+最新 sequence replay 还需要额外区分：
+
+- `STOP` 与 `motion_stop` 不应混为一谈。`motion_stop` 表示禁止前进但继续观察/搜索；`STOP` 应是搜索失败后的兜底终态。
+- 无人帧必须推进丢失/搜索计时，否则 PC 回放会低估目标离开的影响。
+- 目标返回后若出现连续多帧 `ReID + bbox + prediction` 稳定证据，应允许进入 `REACQUIRE_TARGET`，而不是一直卡在 `IDENTITY_UNCERTAIN`。
+
 ## Git 与隐私边界
 
 可以提交：
 
 - `README.md`
 - `docs/`
-- 自研脚本，例如 `simulate_target_follow_v2.py`、`simulate_target_follow_with_bbox_v1.py`
+- 自研脚本，例如 `simulate_target_follow_v2.py`、`simulate_target_follow_with_bbox_v1.py`、`simulate_state_machine_replay_v1.py`、`simulate_chronological_session_replay_v1.py`、`simulate_sequence_session_replay_v1.py`
 - 必要的小型配置或说明文件
 
 不要提交：
