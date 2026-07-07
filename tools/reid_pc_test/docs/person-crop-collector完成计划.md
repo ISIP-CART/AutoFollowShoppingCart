@@ -1,5 +1,9 @@
 # Person Crop Collector 完成计划
 
+> 2026-07-07 补充：现有 `PersonCropCollector` 继续保持轻量，主要负责 ReID crop 数据采集。为了做真实时序状态机回放，已新增相邻的 `PersonSequenceCollector / SEQUENCE mode`，专门记录连续帧事实数据。
+
+> 2026-07-07 最新状态：`PersonSequenceCollector` 已在 Android 端实现、构建通过并完成真机安装；已采集 `yrc_seq_20260707_140056` 与 `yrc2_seq_20260707_152237` 两条 sequence，PC 端 `simulate_sequence_session_replay_v1.py` 已可读取 `frame_log.csv / detections.csv / events.csv / crops/` 进行状态机回放。
+
 > 项目：自主跟随购物车原型  
 > 模块：OpenBot Android 上位机 / ReID 数据采集工具  
 > 建议分支：`feature/person-crop-collector`  
@@ -729,22 +733,256 @@ python simulate_gallery_probe_v2.py ^
 
 ---
 
-## 17. 最近执行清单
+## 17. PersonSequenceCollector / SEQUENCE mode 规划
+
+### 17.1 为什么不直接加重 PersonCropCollector
+
+`PersonCropCollector` 当前已经能完成 ReID 早期最需要的数据：干净的 person crop、bbox 坐标、置信度和 session metadata。它适合回答：
 
 ```text
-[ ] 新建 feature/person-crop-collector 分支
-[ ] 新增主菜单入口和 nav_graph 路由
-[ ] 新建 PersonCropCollectorFragment 空页面
-[ ] 复用 Detector，显示 person bbox
-[ ] 新建 PersonCropCaptureConfig
-[ ] 新建 PersonCropSession
-[ ] 新建 PersonCropSaver
-[ ] 实现 Start / Stop Session
-[ ] 保存 crops/*.jpg
-[ ] 写 metadata.csv
-[ ] 写 session_info.json
-[ ] 显示 saved / skipped / persons / fps
-[ ] 真机采集 1 个 session
-[ ] adb pull 导出
-[ ] PC 端跑 ReID 复测
+这个人的 crop 能不能被 ReID 特征区分？
+gallery 选几张比较稳？
+best_score / margin / bbox gate 的阈值大概在哪里？
+```
+
+但它不适合直接回答状态机问题，因为状态机还需要知道：
+
+```text
+某一帧没有检测到人；
+某一帧检测到了多个人；
+目标离开后过了多少帧又回来；
+干扰者是什么时候进入画面；
+bbox 是否连续移动，而不是随机抽样跳变。
+```
+
+因此下一阶段建议保留 `PersonCropCollector`，再新增一个相邻模块：
+
+```text
+PersonSequenceCollector
+```
+
+它的定位是“时序事实记录器”，不是跟随状态机，也不是 Android ReID 判决器。
+
+### 17.2 采集模式
+
+建议新增采集模式枚举：
+
+```java
+enum CollectorMode {
+    OFF,
+    CROP_ONLY,
+    SEQUENCE
+}
+```
+
+含义：
+
+| 模式 | 行为 |
+|---|---|
+| `OFF` | 不采集数据。 |
+| `CROP_ONLY` | 沿用现有 `PersonCropCollector`，只保存有效 crop 和 `metadata.csv`。 |
+| `SEQUENCE` | 保存连续帧日志、检测框日志、可选 crop、可选 overlay 和人工事件。 |
+
+### 17.3 SEQUENCE 目录结构
+
+建议保存到：
+
+```text
+/sdcard/Android/data/org.openbot/files/Pictures/cartfollow_sequences/
+└── ysy_seq_20260707_153012/
+    ├── frame_log.csv
+    ├── detections.csv
+    ├── events.csv
+    ├── session_info.json
+    ├── crops/
+    └── overlays/
+```
+
+其中 `crops/` 和 `overlays/` 可以按开关启用，不应成为首轮必须项。
+
+### 17.4 frame_log.csv
+
+`frame_log.csv` 每个采样帧一行，即使没有检测到任何人也要写入。
+
+推荐字段：
+
+```csv
+session_id,frame_id,timestamp_ms,elapsed_ms,image_width,image_height,num_persons,raw_frame_path,overlay_path,event_tag,note
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `session_id` | 当前 sequence session。 |
+| `frame_id` | OpenBot/Camera 当前帧编号。 |
+| `timestamp_ms` | 当前帧时间戳。 |
+| `elapsed_ms` | 距离 session 开始的毫秒数。 |
+| `image_width/image_height` | detector 所使用的图像尺寸。 |
+| `num_persons` | 当前帧检测到的人数，可以为 0。 |
+| `raw_frame_path` | 可选整帧路径，首轮可为空。 |
+| `overlay_path` | 可选可视化叠加图路径。 |
+| `event_tag` | 可选人工事件标签。 |
+| `note` | 可选人工备注。 |
+
+### 17.5 detections.csv
+
+`detections.csv` 每个检测框一行。若某帧 `num_persons=0`，则 `frame_log.csv` 有记录，但 `detections.csv` 不写 detection 行。
+
+推荐字段：
+
+```csv
+session_id,frame_id,det_id,timestamp_ms,confidence,bbox_left,bbox_top,bbox_right,bbox_bottom,bbox_width,bbox_height,bbox_area_ratio,center_x,center_y,edge_touch,crop_path
+```
+
+首轮不要求 Android 端判断哪个 detection 是目标，只记录 detector 事实。目标身份、状态机状态和是否错误恢复，都交给 PC 端 replay 脚本推导。
+
+### 17.6 events.csv
+
+`events.csv` 是可选人工事件记录。建议支持以下事件名：
+
+```text
+target_visible
+target_left
+target_return
+occlusion_start
+occlusion_end
+distractor_enter
+distractor_leave
+manual_note
+```
+
+推荐字段：
+
+```csv
+session_id,timestamp_ms,frame_id,event_type,note
+```
+
+它的作用不是训练模型，而是让 PC 端回放时知道“这一段为什么目标消失/为什么路人进入”。
+
+### 17.7 session_info.json
+
+建议增加以下信息：
+
+```json
+{
+  "session_id": "ysy_seq_20260707_153012",
+  "collector": "PersonSequenceCollector",
+  "mode": "SEQUENCE",
+  "person_id": "ysy",
+  "frame_log_interval_ms": 200,
+  "crop_interval_ms": 500,
+  "overlay_interval_ms": 1000,
+  "save_crops": true,
+  "save_overlays": false,
+  "detector": "OpenBot person detector"
+}
+```
+
+实际第二轮采集 `yrc2_seq_20260707_152237` 中，界面将 crop interval 调整为 300 ms，因此 `session_info.json` 记录为：
+
+```json
+{
+  "frame_log_interval_ms": 200,
+  "crop_interval_ms": 300,
+  "overlay_interval_ms": 1000,
+  "save_crops": true,
+  "save_overlays": false
+}
+```
+
+这说明 SEQUENCE 模式中的采样间隔应视为“可调采集参数”，文档中的默认值不是固定实验条件。
+
+### 17.8 默认采样频率
+
+首轮推荐：
+
+| 数据 | 默认频率 | 说明 |
+|---|---:|---|
+| `frame_log.csv` | 5 Hz | 足够做状态机时间顺序回放。 |
+| `detections.csv` | 5 Hz | 与 frame log 对齐。 |
+| `crops/` | 2 Hz | 控制存储量，同时保留 ReID probe。 |
+| `overlays/` | 1 Hz | 仅用于人工排查，可关闭。 |
+
+实测建议：
+
+```text
+首轮排查可用 cropIntervalMs=500；
+需要更密集 ReID replay 时可调到 300；
+若手机发热、卡顿或存储压力明显，再调回 500。
+```
+
+### 17.9 Definition of Done
+
+`PersonSequenceCollector / SEQUENCE mode` 首轮完成标准：
+
+```text
+可从 App 进入 SEQUENCE 采集模式；
+可创建 cartfollow_sequences/<session_id>/；
+无人帧会写入 frame_log.csv；
+多人帧会在 detections.csv 写多行；
+不写 FOLLOW / LOST / REACQUIRE / STOP 状态标签；
+可选保存 crop 和 overlay；
+60 秒采集无明显 UI 卡顿；
+adb pull 后 PC 端可读取 CSV；
+PC chronological replay 可基于导出的 sequence 数据继续扩展。
+```
+
+当前完成情况：
+
+| 项目 | 状态 |
+|---|---|
+| App 入口 | 已完成，主菜单存在 `Person Sequence Collector`。 |
+| 无人帧记录 | 已验证，`frame_log.csv` 中存在 `num_persons=0`。 |
+| 多人帧记录 | 已验证，第二条 sequence 中存在 `num_persons>=2` 帧。 |
+| 事件按钮 | 已验证，`target_left/return`、`distractor_enter/leave`、`occlusion_start/end` 可写入 `events.csv`。 |
+| crop 保存 | 已验证，第二条 sequence 147 个可用 crop。 |
+| PC replay | 已验证，`simulate_sequence_session_replay_v1.py` 可读取并输出 summary / transitions / diagnostic_summary。 |
+| 状态标签边界 | 已满足，采集器只记录事实，不写 `FOLLOW / LOST / REACQUIRE / STOP`。 |
+
+### 17.10 对 PC 回放的新要求
+
+第二条 sequence 暴露出一个重要测试口径：真实控制循环不能只在有 crop 的帧推进状态机，无人帧也必须推进丢失/搜索计时。因此 PC 端已新增：
+
+```text
+simulate_sequence_session_replay_v1.py --missing-frame-policy advance_empty
+```
+
+解释：
+
+```text
+hold:
+  旧口径，便于复现早期结果。
+
+advance_empty:
+  num_persons=0 时推进 LOST_SEARCH / STOP；
+  有检测但本帧未保存 crop 时保持状态，避免把 crop 采样间隔误判为目标丢失。
+```
+
+后续所有用于 Android 接入决策的 sequence replay，应优先参考 `advance_empty` 结果。
+
+## 18. 最近执行清单
+
+```text
+[x] 新建 feature/person-crop-collector 分支
+[x] 新增主菜单入口和 nav_graph 路由
+[x] 新建 PersonCropCollectorFragment 页面
+[x] 复用 Detector，显示 person bbox
+[x] 新建 PersonCropCaptureConfig
+[x] 新建 PersonCropSession
+[x] 新建 PersonCropSaver
+[x] 实现 Start / Stop Session
+[x] 保存 crops/*.jpg
+[x] 写 metadata.csv
+[x] 写 session_info.json
+[x] 显示 saved / skipped / persons / fps
+[x] 真机采集 crop session
+[x] adb pull 导出
+[x] PC 端跑 ReID 复测
+[x] 新增 PersonSequenceCollector
+[x] 采集真实 sequence：yrc_seq_20260707_140056
+[x] 采集更结构化 sequence：yrc2_seq_20260707_152237
+[x] PC 端 sequence replay
+[ ] 基于 sequence replay 设计 LOCAL_SEARCH / REACQUIRE 主动重捕获策略
+[ ] 将 ReID 作为证据接入 Android FollowStateMachine
 ```
