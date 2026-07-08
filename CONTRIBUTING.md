@@ -1,4 +1,4 @@
-# 协作与 Git 工作流程
+﻿# 协作与 Git 工作流程
 
 本文面向项目组所有成员，记录本仓库和 `dev/OpenBot` 子模块的固定协作流程。原则是：主仓库记录课程文档、设计材料和 OpenBot 子模块指针；OpenBot Android / firmware 代码改动先在 `dev/OpenBot` 子仓库中提交，再回到主仓库提交新的 submodule 指针。
 
@@ -57,7 +57,16 @@ git commit -m "Update project documentation"
 
 提交后按团队约定发起 PR；除非已经确认，不要直接推到 `master`。
 
+如果这次还涉及上位机规划，请顺手检查下面几份文档是否需要一起同步：
+
+- `design/自主跟随购物车上位机软件开发计划.md`
+- `design/上位机软件开发 Phase 2——修正跟随距离控制计划书.md`
+- `design/障碍处理计划书.md`
+- `design/ReID-deep-research-report.md`
+
 ## 4. 修改 OpenBot Android 工程
+
+> **上位机开发进度**：修改 Human Cart Simulator 代码后，请同步更新 `dev/OpenBot/android/cartfollow-devlog.md`。
 
 如果要改 OpenBot Android 工程，先进入子仓库并切到团队开发分支：
 
@@ -74,7 +83,6 @@ E:\THU\2026Summer\AutoFollowShoppingCart\dev\OpenBot\android
 ```
 
 修改并测试后，先在 `dev/OpenBot` 子仓库提交并推送：
-
 ```bash
 git status
 git add android/你改过的文件
@@ -140,3 +148,5 @@ git pull
 - 文档改动同时检查 `README.md`、`design/structure.md` 和相关补充文档是否口径一致。
 - OpenBot 代码改动已经在 `dev/OpenBot` 子仓库中提交。
 - 主仓库只记录 OpenBot 的 submodule 指针，不把 OpenBot 源码复制进主仓库。
+- 不要误提交 `tools/reid_pc_test/images/`、`tools/reid_pc_test/outputs/`、`tools/reid_pc_test/weights/`。
+- 如果修改了 ReID 研究脚本或上位机计划，请确认隐私相关目录仍然被 `.gitignore` 正确忽略。
