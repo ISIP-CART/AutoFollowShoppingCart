@@ -10,6 +10,7 @@ opencode.json
 
 # ReID research workspace: keep code/docs, never upload private/raw assets
 tools/reid_pc_test/images/
+tools/reid_pc_test/images_openbot_clean/
 tools/reid_pc_test/outputs/
 tools/reid_pc_test/weights/
 tools/reid_pc_test/deep-person-reid/build/
