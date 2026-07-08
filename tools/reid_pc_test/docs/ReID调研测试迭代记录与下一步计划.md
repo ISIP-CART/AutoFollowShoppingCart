@@ -1974,4 +1974,96 @@ margin 比绝对分数更有价值；
 
 > 基于 OpenBot 人物检测框 crop，构建多样性目标特征库；以 `osnet_x0_25 + diverse gallery-k=8` 作为首版候选组合；将 ReID margin 作为目标身份确认的安全辅助信号，并通过位置连续性、bbox 尺寸、运动预测和连续多帧稳定性进行融合。在身份不确定或目标缺席风险较高时，系统不切换目标、不恢复前进，而是进入 `FOLLOW_CAUTION / IDENTITY_UNCERTAIN / LOCAL_SEARCH`；若多帧证据稳定，再进入 `REACQUIRE_TARGET` 并恢复 `FOLLOW`。只有搜索失败、风险过高或触发安全异常时才进入 hard `STOP`。
 
+---
+
+## 18. 2026-07-08 Android TFLite 实机接入结果
+
+### 18.1 模型导出与接入状态
+
+已完成 `osnet_x0_25_market1501.pth` 到 Android TFLite 测试资产的导出与验证：
+
+```text
+pth -> legacy ONNX -> onnx2tf -> float32 TFLite
+```
+
+最终 Android 测试模型：
+
+```text
+dev/OpenBot/android/robot/src/main/assets/networks/reid/osnet_x0_25_market1501.tflite
+```
+
+该文件属于本地测试资产，默认不提交。实际检查结果：
+
+```text
+TFLite input  = [1, 3, 256, 128], float32
+TFLite output = [1, 512], float32
+```
+
+这与 Android 端 `TfliteReIDFeatureExtractor` 的 NCHW 输入和 512 维 embedding 预期一致。
+
+最新 `robot-debug.apk` 已成功构建并安装到手机；Human Cart Simulator 中 `reidAvailable=true`，ReID 推理能够运行，debug 面板中的 ReID 字段显示正常。
+
+### 18.2 实机观察
+
+当前实机表现比 PC 纯脚本更接近真实问题：
+
+- 帧率约 30 FPS，说明首版 ReID 低频/事件触发式调度对手机性能压力可接受。
+- ReID 对目标身份有帮助，但仍不能单独保证“不跟错人”。
+- 目标离开画面或多人进入时，仍存在把干扰者识别为目标并错误跟随的风险。
+- 目标重新进入画面时，有时重捕获较慢，甚至识别不出来。
+
+这与 PC 端结论一致：ReID 是有效证据，但不是最终身份判决器。
+
+### 18.3 新判断：需要目标轨迹与身份信念层
+
+当前问题不应继续只靠调高阈值解决。阈值过严会让目标返回后长期卡在 `IDENTITY_UNCERTAIN`；阈值过松又会提高 false accept 和跟错风险。
+
+下一阶段应新增：
+
+```text
+TargetTrackManager:
+  把连续 bbox 关联为短时 track，记录 trackId、年龄、missedFrames、位置和尺寸连续性。
+
+IdentityBeliefAccumulator:
+  对每个 track 累积 target_belief，融合 ReID、bbox、prediction、候选切换和多帧稳定性。
+```
+
+状态机恢复规则应从：
+
+```text
+单帧候选满足 ReID / bbox 条件 -> 恢复 FOLLOW
+```
+
+升级为：
+
+```text
+稳定 track + 稳定 identity belief + 多帧证据
+  -> REACQUIRE_TARGET
+  -> FOLLOW_CAUTION
+  -> FOLLOW_CONFIDENT
+```
+
+### 18.4 下一步最小验收口径
+
+下一轮 Android 测试不再只看 `bestScore / margin`，而要同时观察：
+
+```text
+trackId
+trackAge
+missedFrames
+targetBelief
+beliefReason
+candidateSwitchCount
+stableMatchCount
+state
+selectedAction
+```
+
+验收重点：
+
+1. 目标离开后，干扰者进入画面时不能获得足够 belief 并恢复前进。
+2. 目标返回后，应允许先成为疑似目标，再经多帧稳定进入 `REACQUIRE_TARGET`。
+3. 已锁定目标时，干扰者一帧 ReID 高分不能抢走目标身份。
+4. 搜索阶段可以提高 ReID 频率和原地扫描积极性，但线速度必须保持 0。
+
 
