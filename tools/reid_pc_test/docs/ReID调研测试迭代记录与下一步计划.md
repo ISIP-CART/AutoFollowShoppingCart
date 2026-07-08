@@ -2066,4 +2066,45 @@ selectedAction
 3. 已锁定目标时，干扰者一帧 ReID 高分不能抢走目标身份。
 4. 搜索阶段可以提高 ReID 频率和原地扫描积极性，但线速度必须保持 0。
 
+---
+
+## 19. 2026-07-08 文档同步后的主线口径
+
+当前 ReID 工作已经完成从 PC 研究到 Android 首版接入的闭环：
+
+```text
+PC crop / sequence 测试
+  -> osnet_x0_25 + diverse gallery-k=8
+  -> TFLite 导出
+  -> Android Human Cart Simulator 实机运行
+```
+
+因此后续不再把主要精力放在证明 ReID 是否有效，也不再只围绕 `bestScore / margin` 调阈值。新的主线是把 ReID 放入更稳定的目标身份系统：
+
+```text
+TargetTrackManager:
+  负责短时 bbox 轨迹连续性，给候选人分配 trackId。
+
+IdentityBeliefAccumulator:
+  负责对每个 track 累计 targetBelief，融合 ReID、bbox 连续性、prediction 和候选切换惩罚。
+
+FollowStateMachine:
+  只接受稳定 track + 稳定 belief 的重捕获证据，不接受单帧高分直接恢复 FOLLOW。
+```
+
+这条路线保留了 PC 实验得到的阈值和 gallery 策略，但把它们降级为“证据贡献”，而不是“最终身份判决”。下一阶段 Android 验收重点应从：
+
+```text
+ReID 分数是否高
+```
+
+改为：
+
+```text
+trackId 是否稳定；
+targetBelief 是否能抑制干扰者；
+目标返回时能否在 motion_stop 边界内安全恢复；
+debug 面板能否解释每次恢复、停止或拒绝切换的原因。
+```
+
 
