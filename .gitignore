@@ -5,6 +5,7 @@ Thumbs.db
 *.log
 print/
 outputs/
+tmp/
 opencode.json
 
 # ReID research workspace: keep code/docs, never upload private/raw assets
