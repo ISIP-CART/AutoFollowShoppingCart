@@ -439,3 +439,38 @@ target-absent:
 - `deep-person-reid/` 原始项目：https://github.com/KaiyangZhou/deep-person-reid
 
 本仓库中的 `deep-person-reid/` 仅作为团队本地参考和复现基础。若后续修改其中源码，应按本仓库普通目录处理，而不是 submodule 流程。
+
+## 当前 Android 接入状态（2026-07-08）
+
+PC 侧 ReID 调研已进入 Android 实机验证阶段：
+
+- `osnet_x0_25_market1501.pth` 已成功导出为 Android 可加载的 float32 TFLite 测试资产。
+- Android 端模型输入为 `[1,3,256,128]`，输出为 `[1,512]`。
+- 最新 Human Cart Simulator 中 `reidAvailable=true`，debug 面板 ReID 字段显示正常。
+- 手机实测帧率约 30 FPS，首版 TFLite ReID 调度性能可接受。
+
+本地模型文件位置：
+
+```text
+dev/OpenBot/android/robot/src/main/assets/networks/reid/osnet_x0_25_market1501.tflite
+```
+
+注意：该文件仍属于本地测试资产，不提交到版本库。
+
+当前实机结论：
+
+```text
+ReID 已能作为身份线索运行；
+但单帧 ReID / margin / bbox gate 仍不足以保证不跟错人；
+目标返回后的重捕获有时偏慢或无法确认；
+下一步应从“每帧选最像的人”升级为“维护目标 track 与身份 belief”。
+```
+
+建议下一步主线：
+
+1. 在 Android Human Cart Simulator 中新增 `TargetTrackManager`，用 bbox IoU / center distance / area ratio 做短时 track 关联。
+2. 新增 `IdentityBeliefAccumulator`，将 ReID、bbox 连续性、prediction、候选切换次数累积为 `targetBelief`。
+3. 状态机只允许稳定 track + 稳定 belief 触发 `REACQUIRE_TARGET -> FOLLOW`，不允许单帧高分直接恢复前进。
+4. debug 面板新增 `trackId / trackAge / missedFrames / targetBelief / beliefReason`。
+
+PC 侧后续仍保留价值，但主要用于离线复盘和参数对照；主线验证应优先在 Android Human Cart Simulator 中进行。
