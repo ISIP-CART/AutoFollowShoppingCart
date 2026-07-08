@@ -2107,4 +2107,30 @@ targetBelief 是否能抑制干扰者；
 debug 面板能否解释每次恢复、停止或拒绝切换的原因。
 ```
 
+### 19.1 阶段 C Android 首版接入结果
+
+`dev/OpenBot/android` 已完成阶段 C 首版代码接入：
+
+- `TargetTrackManager` 将每帧 person bbox 关联为短时 track。
+- `IdentityBeliefAccumulator` 将 ReID、bbox continuity、prediction、locked track、track age、candidate switch 和 missed frame 转换为 `targetBelief`。
+- `IdentityEvidence` 已扩展 `trackId / lockedTrackId / suspectedTrackId / targetBelief / beliefStableFrames / beliefReason`。
+- `FollowStateMachine` 在存在 belief 时优先使用 belief 恢复与降级，不再只依赖单帧 `bestScore / margin`。
+- Human Cart Simulator overlay 显示 `T<trackId> b=<belief>`，debug 面板显示 track/belief 细节。
+
+构建验证已经通过：
+
+```powershell
+.\gradlew.bat :robot:assembleDebug
+```
+
+下一轮 ReID 验收应以手机实测为准，而不是 PC 脚本继续调阈值。需要重点复测：
+
+```text
+目标离开后干扰者进入；
+目标重新回到画面；
+目标在场时干扰者穿越；
+遮挡、蹲下、局部可见；
+单人正常跟随时 trackId 和 belief 是否稳定。
+```
+
 

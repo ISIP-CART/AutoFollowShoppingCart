@@ -119,6 +119,7 @@ git submodule update --init --recursive
 - `Human Cart Simulator` 已跑通目标初始化、确认、距离状态、行为动作与 debug 面板。
 - 阶段 A 已完成：`Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 最小行为层可运行。
 - 阶段 B 已完成首版：Android 端 TFLite ReID 已接入 Human Cart Simulator，`osnet_x0_25` 推理可运行，实机约 30 FPS。
+- 阶段 C 已完成首版代码接入：Human Cart Simulator 已新增 `TargetTrackManager + IdentityBeliefAccumulator`，开始从单帧 ReID 候选升级为短时轨迹与累计身份信念。
 - PC 端 ReID 研究工作区位于 `tools/reid_pc_test/`，已包含 crop 数据整理、bbox gate、chronological replay、sequence replay 等脚本和文档。
 - `PersonCropCollector` 与 `PersonSequenceCollector` 已用于采集真实 OpenBot 检测框 crop 与连续时序数据。
 
@@ -129,7 +130,7 @@ git submodule update --init --recursive
 如何在目标返回后更快、更安全地重捕获。
 ```
 
-下一步阶段 C 是在 Android 端新增轻量 `TargetTrackManager + IdentityBeliefAccumulator`，把单帧 ReID 候选升级为“稳定轨迹 + 累计身份信念”，再驱动 `REACQUIRE / FOLLOW_CAUTION / FOLLOW_CONFIDENT`。
+下一步应安装最新 APK 做手机验收，重点观察 `trackId / lockedTrackId / suspectedTrackId / targetBelief / beliefReason`，验证目标离开、干扰者进入、目标返回和多人穿越时是否比单帧 ReID 更稳。
 
 注意：`*.tflite`、`*.pth`、`*.onnx`、`tools/reid_pc_test/images/`、`tools/reid_pc_test/outputs/`、`tools/reid_pc_test/weights/` 等本地模型、图片和实验输出默认不进入版本库。
 
