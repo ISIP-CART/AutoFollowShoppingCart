@@ -12,6 +12,15 @@ role: ReID 作为身份置信度辅助，不作为独立身份判决器
 current focus: 真实 sequence 回放暴露“恢复过保守”，下一步设计 LOCAL_SEARCH / REACQUIRE 主动找人策略
 ```
 
+2026-07-08 最新焦点：
+
+```text
+Android ReID 已在 Human Cart Simulator 中跑通；
+ReID crop 已修正为 upright 输入；
+新旧 cartfollow_diagnostics 对比显示 upright 修正有效；
+剩余主要瓶颈转为 candidate switch 与 belief 高但 bbox gate 不放行。
+```
+
 最新结论与下一步计划见：
 
 - `docs/ReID调研测试迭代记录与下一步计划.md`
@@ -96,6 +105,7 @@ identity,session_id,out_path,src_path,frame_id,timestamp_ms,bbox_left,...
 | `simulate_state_machine_replay_v1.py` | 当前可用 | 初版状态机回放。把 bbox gate rows 串成证据流，检查是否会错误恢复 `FOLLOW`、过度 STOP 或长时间不确定。 |
 | `simulate_chronological_session_replay_v1.py` | 当前可用 | 按真实 session 时间顺序回放。用同一人的前若干帧建 gallery，后续帧连续作为 probe，并支持人工缺失段和干扰者插入。 |
 | `simulate_sequence_session_replay_v1.py` | 当前可用 | 回放 Android `PersonSequenceCollector` 采集的真实时序数据。读取 `frame_log.csv`、`detections.csv`、`events.csv` 和 crop，评估真实无人帧、多检测框、人工事件下的 ReID + bbox + 状态机行为。 |
+| `analyze_cartfollow_diagnostics_v1.py` | 当前可用 | 分析 Human Cart Simulator 诊断日志。支持单目录分析和 `--compare-roots old=...,new=...` 新旧对比，输出恢复结果、blocker flags、gallery quality 和 upright crop 修正效果报告。 |
 | `collect_diverse_gallery_images.py` | 辅助工具 | 根据特征多样性挑选 gallery 图片，便于人工检查 confirmedGallery 候选。 |
 | `analyze_identity_pairs.py` | 辅助工具 | 分析身份对之间的相似度分布，定位最容易混淆的身份组合。 |
 | `inspect_hard_pairs.py` | 辅助工具 | 检查 hard pairs / fail cases，帮助人工查看高相似误匹配样本。 |
@@ -352,6 +362,43 @@ python simulate_sequence_session_replay_v1.py ^
 - 加入 `advance_empty` 后，无人帧会更真实地推进搜索超时；这说明后续不能只调大 timeout，还要设计更主动的 `LOCAL_SEARCH / REACQUIRE` 恢复路径。
 - 宽松恢复条件对照中，`stop_count=0`、`over_stop_rate=0`、`final_state=FOLLOW_CAUTION`，且 `wrong_recovery_count=0`。这说明“安全前提下更主动恢复”是可行方向。
 
+### 9. Human Cart Simulator 诊断日志分析
+
+默认分析最新诊断目录：
+
+```powershell
+python analyze_cartfollow_diagnostics_v1.py
+```
+
+指定新旧数据对比：
+
+```powershell
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare
+```
+
+用途：
+
+- 汇总每个诊断 session 的 state/action/persons/fps/ReID/belief/bbox gate。
+- 对每次 `target_return` 输出 `recovered_fast / recovered_slow / not_recovered_in_window / hard_stop_before_return`。
+- 同时输出 frame 差值和 ms 差值，避免只看 frame_id 误判恢复时间。
+- 标记 blocker flags：`belief_high_bbox_failed`、`bbox_gate_lag`、`candidate_switch_penalty`、`reid_low_or_margin_low`、`no_visible_track`。
+- 区分 `gallery_candidate` 和 `confirmed_snapshot`；只有 `gallery_candidate` 算作 ReID gallery 输入质量。
+
+当前新旧对比结论：
+
+| 数据 | target_return | recovered_rate | hard_stop_count | best_score_mean | margin_mean | bbox_default_ok_rate | gallery_candidate_landscape_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| old | 11 | 0.5455 | 2 | 0.5017 | 0.3431 | 0.4451 | 1.0000 |
+| new | 16 | 0.8750 | 0 | 0.5992 | 0.4611 | 0.5485 | 0.0000 |
+
+解释：
+
+- `reid_crop_upright=true` 后，gallery candidate 已从横向输入变成竖向输入，ReID 分数和恢复率都有改善。
+- 新数据中不再以 hard STOP 为主要问题。
+- 剩余主要 blocker 是 `candidate_switch_penalty` 和 `belief_high_bbox_failed`；下一轮应优先修 track association、locked track 保护、分状态 bbox gate，而不是继续盲目调 ReID 阈值。
+
 ## 输出文件命名
 
 所有脚本默认输出到 `outputs/`。常见文件包括：
@@ -380,6 +427,10 @@ python simulate_sequence_session_replay_v1.py ^
 | `_data_quality.csv` | sequence replay 数据质量检查，包含 frame/detection/event/crop 数量和缺失 crop 统计。 |
 | `_diagnostic_summary.csv` | sequence replay 分段诊断，包含 `all_reid`、`pre_stop`、`at_or_post_stop` 和 `post_stop_only`。 |
 | `_summary.csv` / `_transitions.csv` / `_frame_rows.csv` | sequence replay 的汇总、状态转换和逐帧明细；文件名前缀由 `--output-prefix` 决定。 |
+| `diagnostic_compare_summary.csv` | Human Cart diagnostic 新旧根目录对比汇总。 |
+| `diagnostic_return_comparison.csv` | 每次 `target_return` 的 outcome、blocker flags、恢复帧数和恢复时间。 |
+| `diagnostic_upright_effect_report.md` | upright crop 修正前后效果报告。 |
+| `diagnostic_gallery_quality.csv` | gallery candidate / confirmed snapshot 的尺寸和质量标签。 |
 
 ## 结果解读口径
 
@@ -474,3 +525,11 @@ ReID 已能作为身份线索运行；
 4. debug 面板新增 `trackId / trackAge / missedFrames / targetBelief / beliefReason`。
 
 PC 侧后续仍保留价值，但主要用于离线复盘和参数对照；主线验证应优先在 Android Human Cart Simulator 中进行。
+
+最新诊断分析结论：
+
+```text
+upright crop 修正已经有效；
+继续只调 ReID bestScore/margin 的收益有限；
+下一步更应围绕 trackId 稳定、candidate switch 惩罚、lockedTrack 保护和分状态 bbox gate 做 Android 策略修正。
+```

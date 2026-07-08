@@ -2289,4 +2289,128 @@ belief_high_bbox_failed 是否减少；
 
 若 upright crop 后问题仍主要集中在 `belief_high_bbox_failed`，下一步再进入“分状态 bbox gate + recoverable stop”策略修正，而不是继续盲目调 ReID 分数阈值。
 
+---
+
+## 21. 2026-07-08 新旧诊断数据对比：upright crop 有效，但剩余瓶颈转向 track/bbox gate
+
+### 21.1 数据来源
+
+本轮将旧版 Human Cart Simulator 诊断数据和修正 ReID crop 方向后的新版诊断数据分开保存：
+
+```text
+旧数据：tools/reid_pc_test/images/cartfollow_diagnostics_old/
+新数据：tools/reid_pc_test/images/cartfollow_diagnostics/
+```
+
+新版 session 的 `session_info.json` 已显示：
+
+```text
+reid_crop_upright = true
+sensor_orientation = 90
+```
+
+对应 PC 侧分析脚本已经扩展为：
+
+```powershell
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare
+```
+
+脚本输出：
+
+- `diagnostic_compare_summary.csv`
+- `diagnostic_return_comparison.csv`
+- `diagnostic_upright_effect_report.md`
+- `diagnostic_gallery_quality.csv`
+
+其中 `diagnostic_gallery_quality.csv` 明确区分：
+
+```text
+gallery_candidate：实际 ReID gallery 输入候选；
+confirmed_snapshot：人工确认面板截图，不作为 ReID gallery 输入。
+```
+
+### 21.2 新旧对比结果
+
+| 数据 | sessions | target_return | recovered_rate | recovered_fast | recovered_slow | not_recovered | hard_stop | best_mean | margin_mean | bbox_default_rate | gallery_candidate_landscape_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| old | 4 | 11 | 0.5455 | 5 | 1 | 3 | 2 | 0.5017 | 0.3431 | 0.4451 | 1.0000 |
+| new | 2 | 16 | 0.8750 | 11 | 3 | 2 | 0 | 0.5992 | 0.4611 | 0.5485 | 0.0000 |
+
+这一组数据说明：
+
+1. upright crop 修正确实有效。旧数据中 `gallery_candidate_landscape_rate=1.0000`，新数据降为 `0.0000`。
+2. ReID 分数整体改善。`best_score_mean` 从 `0.5017` 提升到 `0.5992`，`margin_mean` 从 `0.3431` 提升到 `0.4611`。
+3. 恢复表现改善。`target_return` 后恢复率从 `0.5455` 提升到 `0.8750`。
+4. 旧数据中的 `hard_stop_before_return` 问题在新数据中暂未出现，说明新版采集和状态观察已经更接近“可恢复搜索”口径。
+
+### 21.3 剩余 blocker
+
+新数据中主要 blocker 已经不再是 crop 方向或 hard STOP：
+
+```text
+candidate_switch_penalty: 15
+belief_high_bbox_failed: 10
+```
+
+典型含义：
+
+| blocker | 含义 | 工程解释 |
+|---|---|---|
+| `candidate_switch_penalty` | 疑似目标 track 在恢复窗口内发生切换或切换惩罚持续存在 | 轨迹关联和 locked/suspected track 保护仍不够稳 |
+| `belief_high_bbox_failed` | ReID / belief 已经较高，但 bbox default/strict gate 不通过 | 目标返回时位置跳变、视角变化或预测区域过窄导致恢复被挡住 |
+
+这说明当前剩余问题主要在“如何稳定维护目标轨迹并分状态使用 bbox gate”，而不是继续证明 ReID 是否可用。
+
+### 21.4 当前结论
+
+本轮之后，ReID 路线的主结论更新为：
+
+```text
+osnet_x0_25 + TFLite + upright crop 已可作为 Android 端身份线索；
+diverse gallery-k=8 仍是首版目标 gallery 策略；
+ReID 分数和 margin 有用，但必须进入 targetBelief，而不是直接触发 FOLLOW；
+目标返回时恢复慢/不恢复，主要看 candidate switch 与 bbox gate；
+非目标偶发转绿，需要检查 lockedTrack 是否丢失、trackId 是否错关联、candidate switch 惩罚是否不足。
+```
+
+因此下一轮不建议继续优先做：
+
+```text
+继续调高/调低 bestScore 或 margin；
+继续换更大 ReID 模型；
+直接放宽所有 bbox gate。
+```
+
+更合理的下一步是 Android 端策略修正：
+
+1. **Track association 稳定性。**  
+   检查 `TargetTrackManager` 在目标离开、返回、干扰者穿越时是否频繁换 trackId；必要时提高 locked track 的保留优先级。
+
+2. **分状态 bbox gate。**  
+   `FOLLOW` 可以保持严格 gate；`REACQUIRE_TARGET / IDENTITY_UNCERTAIN` 应允许更宽的初始 gate，但要求多帧稳定后再恢复跟随。
+
+3. **Recoverable stop。**  
+   区分“可恢复停止观察”和 hard STOP。只要不是安全异常，目标返回后仍应允许走 `SEARCH / REACQUIRE` 链路。
+
+4. **诊断闭环保留。**  
+   每次策略修改后继续采集 `cartfollow_diagnostics`，用 `diagnostic_return_comparison.csv` 验证是否降低 `candidate_switch_penalty / belief_high_bbox_failed`，并确认没有增加非目标转绿。
+
+### 21.5 下一轮验收口径
+
+下一轮 Android 策略修改完成后，不再只看“看起来有没有跟上”，而应至少输出以下判断：
+
+```text
+target_return 后 recovered_rate 是否继续提高；
+mean_ms_to_follow 是否下降；
+not_recovered_in_window 是否减少；
+candidate_switch_penalty 是否下降；
+belief_high_bbox_failed 是否下降；
+非目标转绿是否没有增加；
+gallery_candidate_landscape_rate 是否保持 0。
+```
+
+这组指标比单纯观察框颜色更可靠，也能解释“为什么目标黄框不转绿”和“为什么非目标偶发转绿”。
+
 
