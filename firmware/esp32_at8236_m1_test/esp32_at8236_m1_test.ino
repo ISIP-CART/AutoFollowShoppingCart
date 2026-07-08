@@ -27,6 +27,15 @@
     w  chassis forward with soft start, then stop
     x  chassis backward with soft start, then stop
     g  wait 5 seconds, then run a gentle forward/backward demo
+    z  turn left in place with soft start, then stop
+    c  turn right in place with soft start, then stop
+    h  strafe left with soft start, then stop
+    l  strafe right with soft start, then stop
+    !C,<seq>,<left>,<right>  host tank control, values in [-255,255]
+    !M,<seq>,<vx>,<vy>,<wz>  host mecanum control, values in [-255,255]
+    !S,<seq>                host emergency stop
+    !H,<timeout_ms>         host command timeout, default 500 ms
+    !Q                      query current controller status
     s  stop all motors
     u  enable upload of encoder and speed data, print filtered frames
     o  disable upload of encoder and speed data
@@ -36,21 +45,46 @@
 */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 
 HardwareSerial MotorSerial(2);
+WebServer server(80);
+DNSServer dnsServer;
 
 static const int MOTOR_RX = 16;
 static const int MOTOR_TX = 17;
 
 static const int MOTOR_BAUD = 115200;
 static const int TEST_SPEED = 80;
-static const int CHASSIS_TEST_SPEED = 35;
+static const int CHASSIS_TEST_SPEED = 28;
+static const int TURN_TEST_SPEED = 26;
+static const int STRAFE_TEST_SPEED = 34;
+static const int MAX_MOTOR_SPEED = 100;
+static const int CONTROL_RAMP_STEP = 2;
 static const unsigned long SINGLE_MOTOR_TEST_MS = 800;
 static const unsigned long CHASSIS_TEST_MS = 700;
-static const int RAMP_STEP = 5;
+static const int RAMP_STEP = 2;
 static const unsigned long RAMP_STEP_MS = 120;
 static const unsigned long AUTONOMOUS_START_DELAY_MS = 5000;
+static const unsigned long DEFAULT_COMMAND_TIMEOUT_MS = 500;
 static const int TEST_PWM = 1700;
+static const char *WIFI_AP_SSID = "CartESP32";
+static const char *WIFI_AP_PASS = "cart12345";
+static const unsigned long CONTROL_UPDATE_MS = 50;
+static const byte DNS_PORT = 53;
+const IPAddress AP_IP(192, 168, 4, 1);
+const IPAddress AP_GATEWAY(192, 168, 4, 1);
+const IPAddress AP_SUBNET(255, 255, 255, 0);
+
+// Per-wheel trim. If the cart drifts, adjust these values in 2-5% steps.
+// Example: if the cart drifts left while moving forward, reduce right-side
+// trim or increase left-side trim. Keep values near 100.
+static const int M1_TRIM_PERCENT = 100;
+static const int M2_TRIM_PERCENT = 100;
+static const int M3_TRIM_PERCENT = 100;
+static const int M4_TRIM_PERCENT = 100;
 
 // Current measured directions, viewed from each wheel's outside:
 // M1: + is CCW, - is CW
@@ -62,16 +96,155 @@ static const int TEST_PWM = 1700;
 //   M3 = left front, M4 = right front
 //   M1 = left rear,  M2 = right rear
 //
-// For straight forward:
-//   left wheels should be CW from outside, right wheels should be CCW from outside.
-static const int M1_FORWARD = -CHASSIS_TEST_SPEED;
-static const int M2_FORWARD = CHASSIS_TEST_SPEED;
-static const int M3_FORWARD = CHASSIS_TEST_SPEED;
-static const int M4_FORWARD = -CHASSIS_TEST_SPEED;
+// The first chassis test showed the original forward vector was reversed:
+//   old w:  M1-, M2+, M3+, M4-  moved backward
+//   old x:  M1+, M2-, M3-, M4+  moved forward
+// Keep the command constants aligned with the observed chassis motion.
+static const int M1_FORWARD = CHASSIS_TEST_SPEED;
+static const int M2_FORWARD = -CHASSIS_TEST_SPEED;
+static const int M3_FORWARD = -CHASSIS_TEST_SPEED;
+static const int M4_FORWARD = CHASSIS_TEST_SPEED;
+
+// Differential turn vectors:
+//   left turn = left wheels backward, right wheels forward
+//   M3/M1 are left side, M4/M2 are right side
+static const int M1_TURN_LEFT = -TURN_TEST_SPEED;
+static const int M2_TURN_LEFT = -TURN_TEST_SPEED;
+static const int M3_TURN_LEFT = TURN_TEST_SPEED;
+static const int M4_TURN_LEFT = TURN_TEST_SPEED;
+
+// Mecanum strafe vectors for the wheel layout shown in the KudRobot diagram:
+//   right strafe = LF forward, RF backward, LR backward, RR forward
+// With the measured signs above, that becomes all motors negative.
+// If h/l are reversed on your chassis, swap the two command handlers only.
+static const int M1_STRAFE_LEFT = STRAFE_TEST_SPEED;
+static const int M2_STRAFE_LEFT = STRAFE_TEST_SPEED;
+static const int M3_STRAFE_LEFT = STRAFE_TEST_SPEED;
+static const int M4_STRAFE_LEFT = STRAFE_TEST_SPEED;
 
 bool verboseEcho = false;
 bool printMotorFrames = false;
 String motorFrame;
+unsigned long lastWebSeq = 0;
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+  <title>ESP32 Cart Remote</title>
+  <style>
+    html,body{touch-action:none;overscroll-behavior:none}
+    body{font-family:Arial,sans-serif;margin:0;background:#111;color:#eee;text-align:center;-webkit-user-select:none;user-select:none}
+    h2{font-size:22px;margin:18px 0 6px}
+    p{margin:4px 0 16px;color:#aaa}
+    .grid{display:grid;grid-template-columns:repeat(3,88px);gap:12px;justify-content:center;margin-top:18px}
+    button{height:68px;border:0;border-radius:10px;background:#2f6fed;color:white;font-size:26px;font-weight:700;touch-action:none;-webkit-user-select:none;user-select:none}
+    button.stop{background:#d72638}
+    button.side{background:#555}
+    button:active{filter:brightness(1.35)}
+    .hint{font-size:13px;margin:18px 24px;line-height:1.5;color:#bbb}
+  </style>
+</head>
+<body>
+  <h2>ESP32 Cart Remote</h2>
+  <p>Hold a button to move. Release to stop.</p>
+  <div class="grid">
+    <div></div><button data-cmd="w">F</button><div></div>
+    <button class="side" data-cmd="z">L</button><button class="stop" data-cmd="s">S</button><button class="side" data-cmd="c">R</button>
+    <button class="side" data-cmd="h">SL</button><button data-cmd="x">B</button><button class="side" data-cmd="l">SR</button>
+  </div>
+  <div class="hint">
+    F/B: forward/backward<br>
+    L/R: turn left/right<br>
+    SL/SR: strafe left/right
+    <div id="status">ready</div>
+  </div>
+  <script>
+    let timer = null;
+    let lastCmd = 's';
+    let pendingCmd = null;
+    let inFlight = false;
+    let seq = 0;
+    const statusEl = document.getElementById('status');
+    function pump() {
+      if (inFlight || pendingCmd === null) return;
+      const cmd = pendingCmd;
+      pendingCmd = null;
+      lastCmd = cmd;
+      inFlight = true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 350);
+      fetch('/cmd?c=' + encodeURIComponent(cmd) + '&q=' + (++seq), {
+        cache: 'no-store',
+        signal: controller.signal
+      })
+        .then(() => { statusEl.textContent = 'sent: ' + cmd + ' #' + seq; })
+        .catch(() => { statusEl.textContent = 'send failed, retrying latest'; })
+        .finally(() => {
+          clearTimeout(timeout);
+          inFlight = false;
+          if (pendingCmd !== null) pump();
+        });
+    }
+    function send(cmd) {
+      pendingCmd = cmd;
+      pump();
+    }
+    function start(cmd) {
+      send(cmd);
+      clearInterval(timer);
+      timer = setInterval(() => send(cmd), 260);
+    }
+    function stop() {
+      clearInterval(timer);
+      timer = null;
+      send('s');
+    }
+    document.querySelectorAll('button').forEach(btn => {
+      const cmd = btn.dataset.cmd;
+      btn.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        btn.setPointerCapture(e.pointerId);
+        cmd === 's' ? stop() : start(cmd);
+      });
+      btn.addEventListener('pointerup', e => { e.preventDefault(); stop(); });
+      btn.addEventListener('pointercancel', e => { e.preventDefault(); stop(); });
+      btn.addEventListener('lostpointercapture', stop);
+    });
+    window.addEventListener('blur', stop);
+  </script>
+</body>
+</html>
+)rawliteral";
+String hostCommand;
+
+enum ControlSource {
+  SOURCE_NONE,
+  SOURCE_WEB,
+  SOURCE_SERIAL
+};
+
+struct ChassisCommand {
+  int vx;
+  int vy;
+  int wz;
+  unsigned long seq;
+  unsigned long lastUpdateMs;
+  ControlSource source;
+};
+
+ChassisCommand commandState = {0, 0, 0, 0, 0, SOURCE_NONE};
+int targetM1 = 0;
+int targetM2 = 0;
+int targetM3 = 0;
+int targetM4 = 0;
+int currentM1 = 0;
+int currentM2 = 0;
+int currentM3 = 0;
+int currentM4 = 0;
+unsigned long commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+unsigned long lastControlUpdateMs = 0;
 
 void sendMotorCommand(const char *cmd) {
   MotorSerial.print(cmd);
@@ -82,6 +255,18 @@ void sendMotorCommand(const char *cmd) {
 }
 
 void stopAllMotors() {
+  commandState.vx = 0;
+  commandState.vy = 0;
+  commandState.wz = 0;
+  commandState.source = SOURCE_NONE;
+  targetM1 = 0;
+  targetM2 = 0;
+  targetM3 = 0;
+  targetM4 = 0;
+  currentM1 = 0;
+  currentM2 = 0;
+  currentM3 = 0;
+  currentM4 = 0;
   sendMotorCommand("$spd:0,0,0,0#");
   delay(50);
   sendMotorCommand("$pwm:0,0,0,0#");
@@ -126,6 +311,15 @@ void printHelp() {
   Serial.println("  w : chassis forward with soft start, then stop");
   Serial.println("  x : chassis backward with soft start, then stop");
   Serial.println("  g : wait 5 seconds, then gentle forward/backward demo");
+  Serial.println("  z : turn left in place with soft start, then stop");
+  Serial.println("  c : turn right in place with soft start, then stop");
+  Serial.println("  h : strafe left with soft start, then stop");
+  Serial.println("  l : strafe right with soft start, then stop");
+  Serial.println("  !C,seq,left,right : host tank control, example !C,1,40,40");
+  Serial.println("  !M,seq,vx,vy,wz : host mecanum control, example !M,2,40,0,0");
+  Serial.println("  !S,seq : host emergency stop, example !S,3");
+  Serial.println("  !H,ms : host command timeout, example !H,500");
+  Serial.println("  !Q : query current controller status");
   Serial.println("  f : M1 +speed, keep running");
   Serial.println("  r : M1 -speed, keep running");
   Serial.println("  s : stop all motors");
@@ -200,6 +394,112 @@ void sendSpeed(int m1, int m2, int m3, int m4) {
   sendMotorCommand(cmd);
 }
 
+int applyTrim(int speed, int trimPercent) {
+  return (speed * trimPercent) / 100;
+}
+
+void sendDriveSpeed(int m1, int m2, int m3, int m4) {
+  sendSpeed(
+    applyTrim(m1, M1_TRIM_PERCENT),
+    applyTrim(m2, M2_TRIM_PERCENT),
+    applyTrim(m3, M3_TRIM_PERCENT),
+    applyTrim(m4, M4_TRIM_PERCENT));
+}
+
+int moveToward(int current, int target, int step) {
+  if (current < target) {
+    current += step;
+    if (current > target) {
+      current = target;
+    }
+  } else if (current > target) {
+    current -= step;
+    if (current < target) {
+      current = target;
+    }
+  }
+  return current;
+}
+
+void setWheelTargetsRaw(int m1, int m2, int m3, int m4) {
+  targetM1 = m1;
+  targetM2 = m2;
+  targetM3 = m3;
+  targetM4 = m4;
+}
+
+void mixChassisToWheelTargets(int vx, int vy, int wz) {
+  vx = constrain(vx, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  vy = constrain(vy, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  wz = constrain(wz, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+
+  int m1 = vx + vy - wz;
+  int m2 = -vx + vy - wz;
+  int m3 = -vx + vy + wz;
+  int m4 = vx + vy + wz;
+
+  int maxAbs = max(max(abs(m1), abs(m2)), max(abs(m3), abs(m4)));
+  if (maxAbs > MAX_MOTOR_SPEED) {
+    m1 = (m1 * MAX_MOTOR_SPEED) / maxAbs;
+    m2 = (m2 * MAX_MOTOR_SPEED) / maxAbs;
+    m3 = (m3 * MAX_MOTOR_SPEED) / maxAbs;
+    m4 = (m4 * MAX_MOTOR_SPEED) / maxAbs;
+  }
+
+  setWheelTargetsRaw(m1, m2, m3, m4);
+}
+
+void setChassisCommand(int vx, int vy, int wz, unsigned long seq, ControlSource source) {
+  if (seq > 0 && seq <= commandState.seq) {
+    return;
+  }
+
+  if (seq > 0) {
+    commandState.seq = seq;
+  }
+  commandState.vx = constrain(vx, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  commandState.vy = constrain(vy, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  commandState.wz = constrain(wz, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  commandState.lastUpdateMs = millis();
+  commandState.source = source;
+  mixChassisToWheelTargets(commandState.vx, commandState.vy, commandState.wz);
+}
+
+void setTankCommand(int left, int right, unsigned long seq, ControlSource source) {
+  left = constrain(left, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+  right = constrain(right, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+
+  int vx = (left + right) / 2;
+  int wz = (right - left) / 2;
+  setChassisCommand(vx, 0, wz, seq, source);
+}
+
+void updateControlLoop() {
+  unsigned long now = millis();
+  if (commandState.source != SOURCE_NONE && now - commandState.lastUpdateMs > commandTimeoutMs) {
+    Serial.println("Command timeout. Stopping.");
+    stopAllMotors();
+    return;
+  }
+
+  if (commandState.source == SOURCE_NONE &&
+      targetM1 == 0 && targetM2 == 0 && targetM3 == 0 && targetM4 == 0 &&
+      currentM1 == 0 && currentM2 == 0 && currentM3 == 0 && currentM4 == 0) {
+    return;
+  }
+
+  if (now - lastControlUpdateMs < CONTROL_UPDATE_MS) {
+    return;
+  }
+  lastControlUpdateMs = now;
+
+  currentM1 = moveToward(currentM1, targetM1, CONTROL_RAMP_STEP);
+  currentM2 = moveToward(currentM2, targetM2, CONTROL_RAMP_STEP);
+  currentM3 = moveToward(currentM3, targetM3, CONTROL_RAMP_STEP);
+  currentM4 = moveToward(currentM4, targetM4, CONTROL_RAMP_STEP);
+  sendDriveSpeed(currentM1, currentM2, currentM3, currentM4);
+}
+
 int scaleSpeed(int target, int currentAbsSpeed, int targetAbsSpeed) {
   if (target == 0 || targetAbsSpeed == 0) {
     return 0;
@@ -220,7 +520,7 @@ void softChassisMove(int m1Target, int m2Target, int m3Target, int m4Target, con
   Serial.println(targetAbsSpeed);
 
   for (int speed = RAMP_STEP; speed <= targetAbsSpeed; speed += RAMP_STEP) {
-    sendSpeed(
+    sendDriveSpeed(
       scaleSpeed(m1Target, speed, targetAbsSpeed),
       scaleSpeed(m2Target, speed, targetAbsSpeed),
       scaleSpeed(m3Target, speed, targetAbsSpeed),
@@ -237,7 +537,7 @@ void softChassisMove(int m1Target, int m2Target, int m3Target, int m4Target, con
   }
 
   for (int speed = targetAbsSpeed - RAMP_STEP; speed > 0; speed -= RAMP_STEP) {
-    sendSpeed(
+    sendDriveSpeed(
       scaleSpeed(m1Target, speed, targetAbsSpeed),
       scaleSpeed(m2Target, speed, targetAbsSpeed),
       scaleSpeed(m3Target, speed, targetAbsSpeed),
@@ -272,29 +572,222 @@ void delayedGentleDemo() {
   softChassisMove(-M1_FORWARD, -M2_FORWARD, -M3_FORWARD, -M4_FORWARD, "gentle demo backward", CHASSIS_TEST_MS);
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
+int tokenToInt(const String &cmd, int tokenIndex) {
+  int start = 0;
+  int currentToken = 0;
 
-  MotorSerial.begin(MOTOR_BAUD, SERIAL_8N1, MOTOR_RX, MOTOR_TX);
-  delay(500);
+  for (int i = 0; i <= cmd.length(); i++) {
+    if (i == cmd.length() || cmd.charAt(i) == ',') {
+      if (currentToken == tokenIndex) {
+        return cmd.substring(start, i).toInt();
+      }
+      currentToken++;
+      start = i + 1;
+    }
+  }
 
-  printHelp();
-  initAT8236();
+  return 0;
 }
 
-void loop() {
-  readMotorFrames();
+int countTokens(const String &cmd) {
+  if (cmd.length() == 0) {
+    return 0;
+  }
 
-  if (Serial.available() <= 0) {
+  int count = 1;
+  for (int i = 0; i < cmd.length(); i++) {
+    if (cmd.charAt(i) == ',') {
+      count++;
+    }
+  }
+  return count;
+}
+
+const char *sourceName(ControlSource source) {
+  switch (source) {
+    case SOURCE_WEB:
+      return "WEB";
+    case SOURCE_SERIAL:
+      return "SERIAL";
+    default:
+      return "NONE";
+  }
+}
+
+void printStatus() {
+  Serial.print("!Q,source=");
+  Serial.print(sourceName(commandState.source));
+  Serial.print(",seq=");
+  Serial.print(commandState.seq);
+  Serial.print(",vx=");
+  Serial.print(commandState.vx);
+  Serial.print(",vy=");
+  Serial.print(commandState.vy);
+  Serial.print(",wz=");
+  Serial.print(commandState.wz);
+  Serial.print(",target=");
+  Serial.print(targetM1);
+  Serial.print(",");
+  Serial.print(targetM2);
+  Serial.print(",");
+  Serial.print(targetM3);
+  Serial.print(",");
+  Serial.print(targetM4);
+  Serial.print(",current=");
+  Serial.print(currentM1);
+  Serial.print(",");
+  Serial.print(currentM2);
+  Serial.print(",");
+  Serial.print(currentM3);
+  Serial.print(",");
+  Serial.print(currentM4);
+  Serial.print(",timeout=");
+  Serial.print(commandTimeoutMs);
+  Serial.println("#");
+}
+
+bool processProtocolCommand(const String &cmd) {
+  if (!cmd.startsWith("!")) {
+    return false;
+  }
+
+  char type = cmd.length() > 1 ? cmd.charAt(1) : '\0';
+
+  if (type == 'Q' || type == 'q') {
+    printStatus();
+    return true;
+  }
+
+  if (type == 'H' || type == 'h') {
+    if (countTokens(cmd) < 2) {
+      Serial.println("!ERR,H requires timeout_ms#");
+      return true;
+    }
+
+    unsigned long timeoutMs = tokenToInt(cmd, 1);
+    if (timeoutMs < 100 || timeoutMs > 3000) {
+      Serial.println("!ERR,H timeout range is 100..3000#");
+      return true;
+    }
+
+    commandTimeoutMs = timeoutMs;
+    Serial.print("!OK,H,");
+    Serial.print(commandTimeoutMs);
+    Serial.println("#");
+    return true;
+  }
+
+  if (type == 'S' || type == 's') {
+    if (countTokens(cmd) >= 2) {
+      unsigned long seq = tokenToInt(cmd, 1);
+      if (seq > 0 && seq <= commandState.seq) {
+        Serial.println("!STALE#");
+        return true;
+      }
+      if (seq > 0) {
+        commandState.seq = seq;
+      }
+    }
+    stopAllMotors();
+    Serial.println("!OK,S#");
+    return true;
+  }
+
+  if (type == 'C' || type == 'c') {
+    if (countTokens(cmd) < 4) {
+      Serial.println("!ERR,C requires seq,left,right#");
+      return true;
+    }
+
+    unsigned long seq = tokenToInt(cmd, 1);
+    if (seq > 0 && seq <= commandState.seq) {
+      Serial.println("!STALE#");
+      return true;
+    }
+
+    int left = tokenToInt(cmd, 2);
+    int right = tokenToInt(cmd, 3);
+    setTankCommand(left, right, seq, SOURCE_SERIAL);
+    Serial.println("!OK,C#");
+    return true;
+  }
+
+  if (type == 'M' || type == 'm') {
+    if (countTokens(cmd) < 5) {
+      Serial.println("!ERR,M requires seq,vx,vy,wz#");
+      return true;
+    }
+
+    unsigned long seq = tokenToInt(cmd, 1);
+    if (seq > 0 && seq <= commandState.seq) {
+      Serial.println("!STALE#");
+      return true;
+    }
+
+    int vx = tokenToInt(cmd, 2);
+    int vy = tokenToInt(cmd, 3);
+    int wz = tokenToInt(cmd, 4);
+    setChassisCommand(vx, vy, wz, seq, SOURCE_SERIAL);
+    Serial.println("!OK,M#");
+    return true;
+  }
+
+  Serial.println("!ERR,unknown command#");
+  return true;
+}
+
+void processHostCommand(String cmd) {
+  cmd.trim();
+  if (cmd.length() == 0) {
     return;
   }
 
-  char c = Serial.read();
-  if (c == '\r' || c == '\n' || c == ' ') {
+  if (processProtocolCommand(cmd)) {
     return;
   }
 
+  if ((cmd.charAt(0) == 'c' || cmd.charAt(0) == 'C') && cmd.length() > 1) {
+    int commaIndex = cmd.indexOf(',');
+    if (commaIndex <= 1) {
+      Serial.print("Bad control command: ");
+      Serial.println(cmd);
+      return;
+    }
+
+    int left = cmd.substring(1, commaIndex).toInt();
+    int right = cmd.substring(commaIndex + 1).toInt();
+    setTankCommand(left, right, 0, SOURCE_SERIAL);
+
+    if (verboseEcho) {
+      Serial.print("OpenBot control left/right: ");
+      Serial.print(left);
+      Serial.print(",");
+      Serial.println(right);
+    }
+    return;
+  }
+
+  if ((cmd.charAt(0) == 'h' || cmd.charAt(0) == 'H') && cmd.length() > 1) {
+    unsigned long interval = cmd.substring(1).toInt();
+    if (interval >= 100 && interval <= 10000) {
+      commandTimeoutMs = interval;
+      Serial.print("Heartbeat timeout ms: ");
+      Serial.println(commandTimeoutMs);
+    } else {
+      Serial.print("Ignored invalid heartbeat interval: ");
+      Serial.println(cmd);
+    }
+    return;
+  }
+
+  if (cmd.length() != 1) {
+    Serial.print("Unknown command: ");
+    Serial.println(cmd);
+    printHelp();
+    return;
+  }
+
+  char c = cmd.charAt(0);
   switch (c) {
     case 'i':
     case 'I':
@@ -358,6 +851,26 @@ void loop() {
       delayedGentleDemo();
       break;
 
+    case 'z':
+    case 'Z':
+      softChassisMove(M1_TURN_LEFT, M2_TURN_LEFT, M3_TURN_LEFT, M4_TURN_LEFT, "turn left", CHASSIS_TEST_MS);
+      break;
+
+    case 'c':
+    case 'C':
+      softChassisMove(-M1_TURN_LEFT, -M2_TURN_LEFT, -M3_TURN_LEFT, -M4_TURN_LEFT, "turn right", CHASSIS_TEST_MS);
+      break;
+
+    case 'h':
+    case 'H':
+      softChassisMove(M1_STRAFE_LEFT, M2_STRAFE_LEFT, M3_STRAFE_LEFT, M4_STRAFE_LEFT, "strafe left", CHASSIS_TEST_MS);
+      break;
+
+    case 'l':
+    case 'L':
+      softChassisMove(-M1_STRAFE_LEFT, -M2_STRAFE_LEFT, -M3_STRAFE_LEFT, -M4_STRAFE_LEFT, "strafe right", CHASSIS_TEST_MS);
+      break;
+
     case 'f':
     case 'F':
       sendMotorCommand("$spd:120,0,0,0#");
@@ -414,4 +927,131 @@ void loop() {
       printHelp();
       break;
   }
+}
+
+void readHostCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\r') {
+      continue;
+    }
+
+    if (c == '\n') {
+      processHostCommand(hostCommand);
+      hostCommand = "";
+      continue;
+    }
+
+    hostCommand += c;
+    if (hostCommand.length() > 64) {
+      Serial.println("Host command too long. Dropped.");
+      hostCommand = "";
+    }
+  }
+}
+
+void applyWebCommand(char c) {
+  switch (c) {
+    case 'w':
+    case 'W':
+      setChassisCommand(CHASSIS_TEST_SPEED, 0, 0, 0, SOURCE_WEB);
+      break;
+    case 'x':
+    case 'X':
+      setChassisCommand(-CHASSIS_TEST_SPEED, 0, 0, 0, SOURCE_WEB);
+      break;
+    case 'z':
+    case 'Z':
+      setChassisCommand(0, 0, TURN_TEST_SPEED, 0, SOURCE_WEB);
+      break;
+    case 'c':
+    case 'C':
+      setChassisCommand(0, 0, -TURN_TEST_SPEED, 0, SOURCE_WEB);
+      break;
+    case 'h':
+    case 'H':
+      setChassisCommand(0, STRAFE_TEST_SPEED, 0, 0, SOURCE_WEB);
+      break;
+    case 'l':
+    case 'L':
+      setChassisCommand(0, -STRAFE_TEST_SPEED, 0, 0, SOURCE_WEB);
+      break;
+    case 's':
+    case 'S':
+    default:
+      stopAllMotors();
+      break;
+  }
+}
+
+void handleRoot() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleCommand() {
+  if (!server.hasArg("c") || server.arg("c").length() == 0) {
+    server.send(400, "text/plain", "missing command");
+    return;
+  }
+
+  if (server.hasArg("q")) {
+    unsigned long seq = server.arg("q").toInt();
+    if (seq == 1) {
+      lastWebSeq = 0;
+    }
+    if (seq > 0 && seq <= lastWebSeq) {
+      server.sendHeader("Cache-Control", "no-store");
+      server.send(200, "text/plain", "stale");
+      return;
+    }
+    if (seq > 0) {
+      lastWebSeq = seq;
+    }
+  }
+
+  applyWebCommand(server.arg("c")[0]);
+  server.sendHeader("Cache-Control", "no-store");
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "text/plain", "ok");
+}
+
+void setupWiFiRemote() {
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
+  WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
+  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, 6, 0, 1);
+  dnsServer.start(DNS_PORT, "*", AP_IP);
+
+  server.on("/", handleRoot);
+  server.on("/cmd", handleCommand);
+  server.onNotFound(handleRoot);
+  server.begin();
+
+  Serial.print("WiFi AP SSID: ");
+  Serial.println(WIFI_AP_SSID);
+  Serial.print("WiFi AP password: ");
+  Serial.println(WIFI_AP_PASS);
+  Serial.print("Phone URL: http://");
+  Serial.println(WiFi.softAPIP());
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  MotorSerial.begin(MOTOR_BAUD, SERIAL_8N1, MOTOR_RX, MOTOR_TX);
+  delay(500);
+
+  printHelp();
+  initAT8236();
+  setupWiFiRemote();
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+  readMotorFrames();
+  readHostCommands();
+  updateControlLoop();
 }
