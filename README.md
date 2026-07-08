@@ -74,6 +74,8 @@ AutoFollowShoppingCart/
 │     └─ 项目汇报超市自主跟随购物车.md
 ├─ dev/
 │  └─ OpenBot/        # Team OpenBot fork, tracked as a Git submodule
+├─ tools/
+│  └─ reid_pc_test/   # PC-side ReID experiments, scripts, docs, and local ignored assets
 ├─ README.md
 └─ AGENTS.md
 ```
@@ -109,6 +111,28 @@ git submodule update --init --recursive
 硬件到位前的软件验证优先从 OpenBot Android 工程开始：使用 Android Studio 打开 `dev/OpenBot/android`，先完成 Gradle Sync、`robot` App 构建安装和手机端摄像头 / 权限验证，再进入跟随逻辑和手机-下位机通信联调。
 
 团队协作、分支、OpenBot 子模块提交流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 当前上位机进度（2026-07-08）
+
+上位机开发已经从文档规划推进到 Android 真机验证阶段，当前主线在 `dev/OpenBot/android`：
+
+- `Human Cart Simulator` 已跑通目标初始化、确认、距离状态、行为动作与 debug 面板。
+- 阶段 A 已完成：`Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 最小行为层可运行。
+- 阶段 B 已完成首版：Android 端 TFLite ReID 已接入 Human Cart Simulator，`osnet_x0_25` 推理可运行，实机约 30 FPS。
+- 阶段 C 已完成首版代码接入：Human Cart Simulator 已新增 `TargetTrackManager + IdentityBeliefAccumulator`，开始从单帧 ReID 候选升级为短时轨迹与累计身份信念。
+- PC 端 ReID 研究工作区位于 `tools/reid_pc_test/`，已包含 crop 数据整理、bbox gate、chronological replay、sequence replay 等脚本和文档。
+- `PersonCropCollector` 与 `PersonSequenceCollector` 已用于采集真实 OpenBot 检测框 crop 与连续时序数据。
+
+当前暴露的核心问题不是“ReID 能否运行”，而是：
+
+```text
+如何防止目标离开后误跟干扰者；
+如何在目标返回后更快、更安全地重捕获。
+```
+
+下一步应安装最新 APK 做手机验收，重点观察 `trackId / lockedTrackId / suspectedTrackId / targetBelief / beliefReason`，验证目标离开、干扰者进入、目标返回和多人穿越时是否比单帧 ReID 更稳。
+
+注意：`*.tflite`、`*.pth`、`*.onnx`、`tools/reid_pc_test/images/`、`tools/reid_pc_test/outputs/`、`tools/reid_pc_test/weights/` 等本地模型、图片和实验输出默认不进入版本库。
 
 ## 4 周阶段目标
 

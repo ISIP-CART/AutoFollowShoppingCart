@@ -92,6 +92,7 @@
   - 距离控制首版采用“初始化距离标定 + 图像伺服 + Distance State”；
   - 障碍处理从“固定前方风险停车”升级为“左 / 中 / 右可通行空间 + 跟随式局部避障”。
   - 目标丢失策略从“一不确定就终态停车”收敛为“先 motion_stop，短时 LOCAL_SEARCH / REACQUIRE，失败后 hard STOP”。
+  - Android TFLite ReID 已在 Human Cart Simulator 中跑通，`TargetTrackManager + IdentityBeliefAccumulator` 阶段 C 首版代码已接入，后续重点是手机实测验证目标轨迹锁定、身份信念恢复和干扰者抑制。
 
 ## ReID 研究工作区约定
 
@@ -259,4 +260,6 @@ git push -u origin docs/your-branch-name
 
 ## 当前仓库状态提示
 
-当前仓库以文档规划为主，代码与硬件实现尚未整理入库。后续若引入代码、固件、BOM、测试记录，应继续遵守上面的架构主线和冲突确认规则。
+当前仓库已经包含文档规划、ReID PC 研究工作区和 OpenBot Android 子仓库指针。`dev/OpenBot/android` 中已实现 Human Cart Simulator、PersonCropCollector、PersonSequenceCollector、阶段 A 行为层、阶段 B ReID 首版接入和阶段 C 目标轨迹/身份信念首版；硬件底盘真实控制仍未接通。
+
+后续若继续引入 Android 代码、固件、BOM、测试记录或模型转换脚本，应继续遵守上面的架构主线、隐私边界和子仓库提交流程。尤其注意不要提交本地采集图片、模型权重、TFLite 测试模型或 PC 输出结果。

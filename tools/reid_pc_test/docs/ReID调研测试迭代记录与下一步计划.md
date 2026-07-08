@@ -2066,4 +2066,154 @@ selectedAction
 3. 已锁定目标时，干扰者一帧 ReID 高分不能抢走目标身份。
 4. 搜索阶段可以提高 ReID 频率和原地扫描积极性，但线速度必须保持 0。
 
+---
+
+## 19. 2026-07-08 文档同步后的主线口径
+
+当前 ReID 工作已经完成从 PC 研究到 Android 首版接入的闭环：
+
+```text
+PC crop / sequence 测试
+  -> osnet_x0_25 + diverse gallery-k=8
+  -> TFLite 导出
+  -> Android Human Cart Simulator 实机运行
+```
+
+因此后续不再把主要精力放在证明 ReID 是否有效，也不再只围绕 `bestScore / margin` 调阈值。新的主线是把 ReID 放入更稳定的目标身份系统：
+
+```text
+TargetTrackManager:
+  负责短时 bbox 轨迹连续性，给候选人分配 trackId。
+
+IdentityBeliefAccumulator:
+  负责对每个 track 累计 targetBelief，融合 ReID、bbox 连续性、prediction 和候选切换惩罚。
+
+FollowStateMachine:
+  只接受稳定 track + 稳定 belief 的重捕获证据，不接受单帧高分直接恢复 FOLLOW。
+```
+
+这条路线保留了 PC 实验得到的阈值和 gallery 策略，但把它们降级为“证据贡献”，而不是“最终身份判决”。下一阶段 Android 验收重点应从：
+
+```text
+ReID 分数是否高
+```
+
+改为：
+
+```text
+trackId 是否稳定；
+targetBelief 是否能抑制干扰者；
+目标返回时能否在 motion_stop 边界内安全恢复；
+debug 面板能否解释每次恢复、停止或拒绝切换的原因。
+```
+
+### 19.1 阶段 C Android 首版接入结果
+
+`dev/OpenBot/android` 已完成阶段 C 首版代码接入：
+
+- `TargetTrackManager` 将每帧 person bbox 关联为短时 track。
+- `IdentityBeliefAccumulator` 将 ReID、bbox continuity、prediction、locked track、track age、candidate switch 和 missed frame 转换为 `targetBelief`。
+- `IdentityEvidence` 已扩展 `trackId / lockedTrackId / suspectedTrackId / targetBelief / beliefStableFrames / beliefReason`。
+- `FollowStateMachine` 在存在 belief 时优先使用 belief 恢复与降级，不再只依赖单帧 `bestScore / margin`。
+- Human Cart Simulator overlay 显示 `T<trackId> b=<belief>`，debug 面板显示 track/belief 细节。
+
+构建验证已经通过：
+
+```powershell
+.\gradlew.bat :robot:assembleDebug
+```
+
+下一轮 ReID 验收应以手机实测为准，而不是 PC 脚本继续调阈值。需要重点复测：
+
+```text
+目标离开后干扰者进入；
+目标重新回到画面；
+目标在场时干扰者穿越；
+遮挡、蹲下、局部可见；
+单人正常跟随时 trackId 和 belief 是否稳定。
+```
+
+### 19.2 最新调试判断：先采证据，再继续改策略
+
+阶段 C 首版实测后，当前观察到两个仍需解释的问题：
+
+```text
+目标回到画面后可能长期保持黄框，迟迟不转绿；
+少数情况下非目标人物仍可能变成绿框。
+```
+
+这两个问题的成因可能完全不同：
+
+| 现象 | 可能原因 |
+| --- | --- |
+| 目标回来后不转绿 | `targetBelief` 增长慢、stableFrames 不够、bbox/prediction gate 过严、relock 条件缺失 |
+| 非目标人物转绿 | lockedTrack 已丢失、track 关联错位、ReID 高分 + bbox gate 误通过、candidate switch 惩罚不足 |
+
+因此下一步不建议继续凭肉眼感受直接调阈值，而应先在 Human Cart Simulator 中加入诊断采集：
+
+```text
+初始化确认目标后，启用一个人工事件按钮。
+
+按钮默认：目标离开画面
+点击后记录 target_left，按钮变为：目标回到画面
+再次点击后记录 target_return，按钮恢复：目标离开画面
+```
+
+该按钮只写日志，不直接干预状态机。人工反应慢是可接受的，后续分析按事件前后时间窗口处理。
+
+建议诊断日志至少记录：
+
+```text
+frame_id / timestamp_ms
+follow_state / selected_action / action_reason
+num_persons
+trackId / lockedTrackId / suspectedTrackId
+trackAge / missedFrames / activeTrackCount
+bestScore / secondScore / margin
+weakOk / midOk / strongOk
+bboxDefaultOk / bboxStrictOk / predictionOk
+targetBelief / beliefStableFrames / beliefUncertainFrames
+candidateSwitchCount / beliefReason
+locked crop / suspected crop / bestReID crop path
+```
+
+建议同时低频保存：
+
+```text
+locked target crop
+suspected target crop
+best ReID candidate crop
+confirmed gallery crop 或缩略图
+可选 overlay 截图
+```
+
+这与 `PersonSequenceCollector` 的区别是：
+
+```text
+PersonSequenceCollector 记录检测事实；
+Human Cart diagnostic 记录状态机、ReID、track、belief 和 action 的现场决策证据。
+```
+
+同时建议优化 Human Cart Simulator UI：
+
+```text
+默认只显示 FPS / state / action / trackId / belief / bestScore / margin；
+增加“调试详情”按钮，点击后展开完整 debug 面板；
+再次点击收起。
+```
+
+这样可以避免左上角调试信息遮挡画面，同时保留完整诊断能力。
+
+下一轮策略修正应基于日志回答：
+
+```text
+真实目标黄框不转绿时，belief 卡在哪个环节？
+非目标转绿前，lockedTrackId 是否还存在？
+是否发生了 trackId 关联错误？
+是否是 ReID 高分但 margin/bbox/prediction 不够稳定？
+是否需要专门的 suspectedTrack -> lockedTrack relock 规则？
+```
+
+只有这些证据明确后，再决定是放宽 relock、调整 belief 增长、延长 track 保留，还是修正 track association。
+
 
