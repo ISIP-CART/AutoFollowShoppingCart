@@ -9,16 +9,18 @@ model: osnet_x0_25
 weight: osnet_x0_25_market1501.pth
 gallery: diverse confirmedGallery(k=8)
 role: ReID 作为身份置信度辅助，不作为独立身份判决器
-current focus: 真实 sequence 回放暴露“恢复过保守”，下一步设计 LOCAL_SEARCH / REACQUIRE 主动找人策略
+current focus: Android 已实现 track/bbox gate、恢复后 relock、非 locked 空间支持门控与诊断日志开关；下一步采集新版 cartfollow_diagnostics 并用 compare 验证 blocker 是否下降
 ```
 
-2026-07-08 最新焦点：
+2026-07-09 最新焦点：
 
 ```text
 Android ReID 已在 Human Cart Simulator 中跑通；
 ReID crop 已修正为 upright 输入；
 新旧 cartfollow_diagnostics 对比显示 upright 修正有效；
-剩余主要瓶颈转为 candidate switch 与 belief 高但 bbox gate 不放行。
+track/bbox gate 小步修正已进入 Android 代码；
+Human Cart Simulator 已新增“记录日志”开关，默认不写 diagnostics；
+下一轮重点检查 candidate_switch_penalty、belief_high_bbox_failed、recovered_rate、非目标转绿和 hard_stop_count。
 ```
 
 最新结论与下一步计划见：

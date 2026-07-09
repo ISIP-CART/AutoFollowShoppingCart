@@ -1,0 +1,6 @@
+interface:
+  display_name: "AutoFollow SysML Modeler"
+  short_description: "Generate Chinese SysML and PUML links."
+  default_prompt: "Use $autofollow-sysml-modeler to update the shopping-cart SysML model in Chinese and generate the default PlantUML diagram links."
+policy:
+  allow_implicit_invocation: true

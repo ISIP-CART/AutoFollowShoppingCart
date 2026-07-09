@@ -374,3 +374,17 @@ void send_wheel_reading(long duration) {
 | `design/structure.md` | 系统设计主文档 |
 | `design/自主跟随购物车上位机软件开发计划.md` | 上位机目标初始化、ReID、Human Cart Simulator 与无底盘调试计划 |
 | `design/工程决策与实现策略记录.md` | 工程决策记录 |
+
+---
+
+## 8. 2026-07-09 上位机实现状态补充
+
+本文件前文主要记录 OpenBot 源码结构与上位机接入点。当前工程进展已经从“预留或接入 ReID embedding”推进到 Android 真机策略验证阶段：
+
+- Human Cart Simulator 已成为当前上位机闭环验证入口，真实底盘前进控制仍未接通；
+- Android 端已完成 `osnet_x0_25_market1501.tflite` ReID 推理，且 ReID crop 已修正为 upright 输入；
+- `TargetTrackManager + IdentityBeliefAccumulator` 已接入 trackId、lockedTrackId、targetBelief、suspectedTrack；
+- 最新策略补入 locked track ghost memory、suspected track 滞回、loose/default/strict bbox gate、恢复后 relock 和非 locked 空间支持门控；
+- Human Cart Simulator 新增“记录日志”开关，默认关闭，关闭时不创建 `cartfollow_diagnostics` session，也不写 CSV/JSON/crop/gallery/event。
+
+因此，当前上位机代码仍复用 OpenBot 原有 Android 主脑和控制链路，但本轮验证重点是身份、轨迹、bbox gate 与状态恢复策略，而不是改造底盘控制路径。进入真实底盘前进联调前，需要先用新版 diagnostics 证明 `candidate_switch_penalty` 和 `belief_high_bbox_failed` 下降，且非目标转绿与 hard stop 不增加。

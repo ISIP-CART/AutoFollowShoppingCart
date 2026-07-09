@@ -503,3 +503,29 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 如果只保留一句最终建议，那就是：
 
 **先用 `osnet_x0_5 + ONNX Runtime Mobile + 事件触发式 ReID` 做出首版，再把 ByteTrack/DeepSORT 的关联逻辑吸收进你的状态机，而不是反过来。**
+
+---
+
+## 2026-07-09 工程落地补充
+
+本报告保留的是 ReID 调研阶段的路线比较和部署建议。实际 Android 工程推进后，当前项目口径已更新如下：
+
+```text
+当前模型：osnet_x0_25_market1501.tflite
+当前运行方式：Android TFLite 推理
+当前 crop 策略：upright crop
+当前角色：ReID 作为身份置信度辅助，不作为独立身份判决器
+```
+
+截至 2026-07-09，ReID 已经不再是“能不能用”的主要 blocker。手机端已能在 Human Cart Simulator 中运行 ReID，并通过 `cartfollow_diagnostics` 与 PC compare 验证 upright crop 修正有效。后续优先级从模型替换和单纯阈值调整，转为 track / bbox / state machine 的诊断指标驱动优化。
+
+当前最新策略包括：
+
+- locked track ghost memory；
+- suspected track 滞回；
+- loose/default/strict 分层 bbox gate；
+- 恢复后 relock；
+- 非 locked track 空间支持门控；
+- `reid_interest_no_spatial_support / spatial_support_missing / relock_after_recovery` 等 debug reason。
+
+因此，若本报告早期段落提到 `osnet_x0_5 + ONNX Runtime Mobile` 的优先路线，应理解为调研阶段建议；当前实现以 `osnet_x0_25 + TFLite + upright crop` 为准。下一步不优先换模型，也不启用 dynamic gallery，而是安装最新 APK 后采集新版 `cartfollow_diagnostics`，检查 `candidate_switch_penalty`、`belief_high_bbox_failed`、`recovered_rate`、非目标转绿次数和 `hard_stop_count`。

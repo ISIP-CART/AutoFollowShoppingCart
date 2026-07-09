@@ -798,7 +798,7 @@ Android 手机 / OpenBot App
 | 305 系列底盘在 1-3 kg 负载下的实际稳定性 | 成员 B / C | 采购后首轮装配测试 | 需要验证电机动力、重心、制动和转弯稳定性 |
 | 磁铁规格、限位件尺寸和快拆件形式 | 成员 C | 结构件采购前 | 需结合底盘孔位、购物筐尺寸和拆装便利性确认 |
 | 目标确认阶段的提示方式与 UI 细节 | 成员 A / C | 上位机交互原型确定前 | 需确定以提示音、语音、目标框颜色还是倒计时界面为主，以及是否支持多候选选择 |
-| ReID 首版如何安全接入状态机 | 成员 A | ReID Android 集成前 | 当前 PC 端主线暂定 `osnet_x0_25 + diverse confirmedGallery(k=8)`；下一步需确认 ONNX Runtime Mobile 接入方式，以及 `reid_score / reid_margin` 如何与位置连续性、bbox 尺寸、运动趋势和连续多帧稳定性融合 |
+| ReID / track / bbox gate 策略实机复测 | 成员 A / C | 最新 APK 安装后 | Android TFLite ReID、upright crop、TargetTrackManager、IdentityBeliefAccumulator、locked ghost、suspected dwell、relock 与空间支持门控已进入代码；下一步用 Human Cart Simulator 诊断日志验证目标返回、遮挡恢复和干扰者抑制。 |
 
 ---
 
@@ -811,8 +811,6 @@ Android 手机 / OpenBot App
 | 确认底盘、ESP32 / 驱动板、电源和急停采购方案 | 成员 B | 第 1 周 | 采购清单与到货计划 |
 | 细化模块化购物筐结构草图和固定件清单 | 成员 C | 第 1 周 | 结构草图、限位 / 磁吸 / 快拆件清单 |
 | 建立负载、快拆复测和安全停车测试记录表 | 成员 C 主，A / B 配合 | 第 2 周 | 测试记录模板 |
-
----
 
 # 18. 附录：备忘与资料链接
 
@@ -845,3 +843,27 @@ Android 手机 / OpenBot App
 3.
 4.
 5.
+
+---
+
+# 19. 2026-07-09 当前实现状态补充
+
+本节用于同步最新工程进展，避免前文初步设计阶段的“待接入 / 待确认”表述被误读为当前状态。
+
+## 19.1 上位机当前状态
+
+- Human Cart Simulator 已成为上位机策略验证主入口；真实底盘前进仍未接通，`ControlGenerator` 当前仍用于 simulator 提示和后续底盘控制路径准备。
+- Android 端 TFLite ReID 已跑通，当前模型路线保持 `osnet_x0_25_market1501.tflite + upright crop + confirmedGallery`，ReID 作为身份线索，不作为单独 FOLLOW 判决器。
+- 阶段 C 已实现目标轨迹和身份信念层，并继续补入 track/bbox gate 修正：locked track ghost memory、suspected track dwell/hysteresis、loose admission gate、default/strict motion gate、恢复后 relock、非 locked track 空间支持门控。
+- Human Cart Simulator 已支持 `cartfollow_diagnostics`，并新增“记录日志”开关；默认关闭时不创建诊断目录、不写 CSV/JSON/crop/gallery/event，只有需要复盘时才打开。
+
+## 19.2 下一步测试口径
+
+下一步不是更换 ReID 模型、启用 dynamic gallery 或直接接真实底盘，而是安装最新 APK 后复测四类场景：
+
+1. 目标离开后原目标返回。
+2. 目标蹲下、弯腰、短遮挡或局部可见后恢复。
+3. 目标离开后干扰者进入。
+4. 目标在场时干扰者穿越或靠近。
+
+测试时只在需要导出数据时打开“记录日志”。导出后用 `tools/reid_pc_test/analyze_cartfollow_diagnostics_v1.py --compare-roots old=...,new=...` 对比 `recovered_rate`、`mean_ms_to_follow`、`candidate_switch_penalty`、`belief_high_bbox_failed`、非目标转绿行数和 `hard_stop_count`。只有这些指标不恶化并且两个 blocker 明显下降后，才考虑进入极低速真实底盘联调。

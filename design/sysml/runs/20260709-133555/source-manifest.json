@@ -1,0 +1,61 @@
+{
+  "run_id": "20260709-133555",
+  "scope": "仅生成需求图和安全状态机图",
+  "sources": [
+    {
+      "path": "AGENTS.md",
+      "used_for": "首版验收口径、架构硬约束、目标丢失策略、隐私边界"
+    },
+    {
+      "path": "README.md",
+      "used_for": "项目范围、总体架构、当前上位机进度、ReID 工作区边界"
+    },
+    {
+      "path": "design/structure.md",
+      "used_for": "需求、用例、性能指标、测试计划、风险与里程碑"
+    },
+    {
+      "path": "design/doc/项目汇报超市自主跟随购物车.md",
+      "used_for": "课程汇报定位、OpenBot 架构、成本约束和核心功能"
+    },
+    {
+      "path": "design/自主跟随购物车上位机软件开发计划.md",
+      "used_for": "行为决策、安全仲裁、ReID 定位、motion_stop 与 hard STOP 边界"
+    },
+    {
+      "path": "design/上位机软件开发 Phase 2——修正跟随距离控制计划书.md",
+      "used_for": "初始化距离标定、图像伺服和 Distance State 需求"
+    },
+    {
+      "path": "design/障碍处理计划书.md",
+      "used_for": "左/中/右可通行空间、低速局部避障和阻塞等待边界"
+    },
+    {
+      "path": "design/OpenBot与四驱麦轮AT8236下位机适配风险说明.md",
+      "used_for": "OpenBot c(left,right)、ESP32/AT8236、心跳、急停和差速首版边界"
+    },
+    {
+      "path": "dev/OpenBot/android/cartfollow-devlog.md",
+      "used_for": "Human Cart Simulator、FollowStateMachine、ActionArbitrator、ReID/track/bbox gate 当前实现状态"
+    },
+    {
+      "path": "tools/reid_pc_test/README.md",
+      "used_for": "ReID 研究工作区定位、诊断指标和隐私目录边界"
+    },
+    {
+      "path": "firmware/esp32_at8236_m1_test/esp32_at8236_m1_test.ino",
+      "used_for": "ESP32/AT8236 bring-up、host tank control、emergency stop、command timeout 和底盘测试接口"
+    },
+    {
+      "path": "design/sysml/skills/autofollow-sysml-modeler/references/plantuml-safe-patterns.md",
+      "used_for": "PlantUML 安全写法和链接生成约束"
+    }
+  ],
+  "excluded_paths": [
+    ".git/",
+    "build outputs",
+    "tools/reid_pc_test/images*/",
+    "tools/reid_pc_test/outputs/",
+    "tools/reid_pc_test/weights/"
+  ]
+}

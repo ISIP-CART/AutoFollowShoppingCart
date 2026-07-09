@@ -112,14 +112,38 @@ git submodule update --init --recursive
 
 团队协作、分支、OpenBot 子模块提交流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 当前上位机进度（2026-07-08）
+## SysML 自动建模与绘图
+
+SysML 风格建模产物位于 `design/sysml/`。团队默认使用 Codex Desktop Skill 生成建模文档、PUML 源文件和 PlantUML 查看链接；已安装 Codex CLI 的成员也可以使用可选批处理脚本。
+
+- 主文档：`design/sysml/sysml-modeling.md`
+- Skill 源目录：`design/sysml/skills/autofollow-sysml-modeler/`
+- 输出目录：`design/sysml/runs/<YYYYMMDD-HHMMSS>/`
+- 常见产物：`puml/*.puml`、`diagram-links.md`、`generation-report.md`、可选 `svg/*.svg`
+
+Codex Desktop 推荐提示词：
+
+```text
+使用 $autofollow-sysml-modeler，读取当前项目文档，更新 SysML 建模文档，生成默认 PlantUML 图并输出链接。
+```
+
+CLI 可选入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\design\sysml\run_sysml.ps1 -Render server -Format svg -CondaEnv base
+```
+
+公共 PlantUML server 会接收 PUML 内容；若不希望上传，可使用 `-Render none` 只生成 PUML 和链接，或使用本地 PlantUML jar。详细说明见 `design/sysml/README.md`。
+
+## 当前上位机进度（2026-07-09）
 
 上位机开发已经从文档规划推进到 Android 真机验证阶段，当前主线在 `dev/OpenBot/android`：
 
 - `Human Cart Simulator` 已跑通目标初始化、确认、距离状态、行为动作与 debug 面板。
 - 阶段 A 已完成：`Evidence -> BehaviorDecisionResult -> BehaviorAction -> HumanCommand` 最小行为层可运行。
 - 阶段 B 已完成首版：Android 端 TFLite ReID 已接入 Human Cart Simulator，`osnet_x0_25` 推理可运行，实机约 30 FPS。
-- 阶段 C 已完成首版代码接入：Human Cart Simulator 已新增 `TargetTrackManager + IdentityBeliefAccumulator`，开始从单帧 ReID 候选升级为短时轨迹与累计身份信念。
+- 阶段 C 已进入策略修正验证：`TargetTrackManager + IdentityBeliefAccumulator` 已从首版接入推进到 locked ghost、suspected dwell、loose/default/strict bbox gate、恢复后 relock 与非 locked 空间支持门控。
+- Human Cart Simulator 已支持 `cartfollow_diagnostics` 诊断采集，并新增“记录日志”开关；默认关闭时不会创建 session 目录或写入 CSV/crop/gallery/event。
 - PC 端 ReID 研究工作区位于 `tools/reid_pc_test/`，已包含 crop 数据整理、bbox gate、chronological replay、sequence replay 等脚本和文档。
 - `PersonCropCollector` 与 `PersonSequenceCollector` 已用于采集真实 OpenBot 检测框 crop 与连续时序数据。
 
@@ -130,7 +154,7 @@ git submodule update --init --recursive
 如何在目标返回后更快、更安全地重捕获。
 ```
 
-下一步应安装最新 APK 做手机验收，重点观察 `trackId / lockedTrackId / suspectedTrackId / targetBelief / beliefReason`，验证目标离开、干扰者进入、目标返回和多人穿越时是否比单帧 ReID 更稳。
+下一步应安装最新 APK 做手机验收。需要先按需打开“记录日志”开关，再采集目标返回、蹲下/遮挡、目标离开 + 干扰者、目标在场 + 干扰者四类短场景，并用 `tools/reid_pc_test/analyze_cartfollow_diagnostics_v1.py --compare-roots old=...,new=...` 复盘 `candidate_switch_penalty / belief_high_bbox_failed / recovered_rate / hard_stop_count / 非目标转绿`。
 
 注意：`*.tflite`、`*.pth`、`*.onnx`、`tools/reid_pc_test/images/`、`tools/reid_pc_test/outputs/`、`tools/reid_pc_test/weights/` 等本地模型、图片和实验输出默认不进入版本库。
 
