@@ -83,6 +83,8 @@
 | **上位机开发进度记录** | `dev/OpenBot/android/cartfollow-devlog.md` | Human Cart Simulator 功能状态、待办项、状态机设计 |
 | 产品参数汇总 | `design/doc/产品参数信息汇总报告.md` | 4 件采购商品的详细参数 |
 | 采购清单 | `design/采购.md` | 商品链接与购买配置 |
+| SysML 自动建模入口 | `design/sysml/README.md` | Codex Desktop Skill、CLI 可选批处理、PUML 与 PlantUML 链接生成说明 |
+| SysML 建模主文档 | `design/sysml/sysml-modeling.md` | 系统级 SysML 风格建模文档，作为后续图生成的 canonical 输入 |
 
 补充说明：
 
@@ -92,7 +94,8 @@
   - 距离控制首版采用“初始化距离标定 + 图像伺服 + Distance State”；
   - 障碍处理从“固定前方风险停车”升级为“左 / 中 / 右可通行空间 + 跟随式局部避障”。
   - 目标丢失策略从“一不确定就终态停车”收敛为“先 motion_stop，短时 LOCAL_SEARCH / REACQUIRE，失败后 hard STOP”。
-  - Android TFLite ReID 已在 Human Cart Simulator 中跑通，`TargetTrackManager + IdentityBeliefAccumulator` 阶段 C 首版代码已接入，后续重点是手机实测验证目标轨迹锁定、身份信念恢复和干扰者抑制。
+  - Android TFLite ReID 已在 Human Cart Simulator 中跑通，`TargetTrackManager + IdentityBeliefAccumulator` 阶段 C 已从首版接入推进到 track/bbox gate 修正：locked ghost memory、suspected track 滞回、loose/default/strict gate、恢复后 relock、非 locked 空间支持门控均已进入代码，后续重点是安装新版 APK 后用诊断日志验证目标返回、遮挡恢复和干扰者抑制。
+  - Human Cart Simulator 的 `cartfollow_diagnostics` 现在由“记录日志”开关控制，默认关闭；关闭时不应创建 session 目录、CSV、crop、gallery 或 event，只有需要复盘时才打开。
 
 ## ReID 研究工作区约定
 
@@ -260,6 +263,6 @@ git push -u origin docs/your-branch-name
 
 ## 当前仓库状态提示
 
-当前仓库已经包含文档规划、ReID PC 研究工作区和 OpenBot Android 子仓库指针。`dev/OpenBot/android` 中已实现 Human Cart Simulator、PersonCropCollector、PersonSequenceCollector、阶段 A 行为层、阶段 B ReID 首版接入和阶段 C 目标轨迹/身份信念首版；硬件底盘真实控制仍未接通。
+当前仓库已经包含文档规划、ReID PC 研究工作区和 OpenBot Android 子仓库指针。`dev/OpenBot/android` 中已实现 Human Cart Simulator、PersonCropCollector、PersonSequenceCollector、阶段 A 行为层、阶段 B ReID 首版接入和阶段 C 目标轨迹/身份信念层；最新 Android 侧还包含 track/bbox gate 修正、恢复后 relock、非 locked 空间支持门控和诊断日志开关。硬件底盘真实控制仍未接通。
 
 后续若继续引入 Android 代码、固件、BOM、测试记录或模型转换脚本，应继续遵守上面的架构主线、隐私边界和子仓库提交流程。尤其注意不要提交本地采集图片、模型权重、TFLite 测试模型或 PC 输出结果。

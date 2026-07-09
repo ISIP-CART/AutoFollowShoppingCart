@@ -1,0 +1,97 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 自主跟随购物车首版需求图
+
+rectangle "首版课程原型\nOpenBot + Android 手机 + MCU/ESP32 + 差速底盘" as SYS <<block>>
+
+rectangle "REQ-01\nOpenBot 基础链路跑通\nApp、下位机、底盘可通信和调试" as R01 <<requirement>>
+rectangle "REQ-02\n手机端手动遥控\n先验证前进、转向、停止、急停" as R02 <<requirement>>
+rectangle "REQ-03\n单目标检测、确认与锁定\n未确认目标不得启动车辆" as R03 <<requirement>>
+rectangle "REQ-04\n低速自主跟随\n室内平坦环境中保持安全距离" as R04 <<requirement>>
+rectangle "REQ-05\n购物筐或载物平台\n首版按 1-3 kg 轻载演示验证" as R05 <<requirement>>
+rectangle "REQ-06\n目标丢失安全处理\n先 motion_stop，再短时 LOCAL_SEARCH" as R06 <<requirement>>
+rectangle "REQ-07\nhard STOP 兜底\n搜索超时、急停、通信异常、障碍高风险必须停车" as R07 <<requirement>>
+rectangle "REQ-08\nReID 作为身份置信线索\n不能单帧高分直接授权前进" as R08 <<requirement>>
+rectangle "REQ-09\n距离状态控制\n初始化标定 + 图像伺服输出 TOO_FAR / OK / TOO_CLOSE / UNKNOWN" as R09 <<requirement>>
+rectangle "REQ-10\n局部安全与障碍处理\n低速、左中右可通行判断，风险不明则等待" as R10 <<requirement>>
+rectangle "REQ-11\nHuman Cart Simulator 验证\n真实底盘前进接通前先验证行为策略" as R11 <<requirement>>
+rectangle "REQ-12\n诊断日志默认关闭\n未开启记录日志时不创建 session、CSV、crop、gallery 或 event" as R12 <<requirement>>
+rectangle "REQ-13\n隐私与研究资产边界\n图片、输出、模型权重默认不提交" as R13 <<requirement>>
+
+rectangle "Android 手机 / OpenBot App\n视觉感知、AI 推理、跟随决策、人机交互" as PHONE <<block>>
+rectangle "Human Cart Simulator\n无底盘实时策略验证与诊断" as SIM <<block>>
+rectangle "目标轨迹与身份信念\nTargetTrackManager\nIdentityBeliefAccumulator" as IDENTITY <<block>>
+rectangle "安全行为决策\nFollowStateMachine\nActionArbitrator" as DECISION <<block>>
+rectangle "距离与运动控制\nDistanceState\nControlGenerator" as CONTROL <<block>>
+rectangle "MCU/ESP32 下位机\n解析 c(left,right)、心跳、急停、限速" as MCU <<block>>
+rectangle "差速底盘与载物结构\n低速移动、购物筐、机械固定" as CHASSIS <<block>>
+rectangle "诊断与复盘工具\ncartfollow_diagnostics\nPC compare" as DIAG <<block>>
+
+rectangle "OUT-01\n完整 SLAM / 高精地图" as O1 <<requirement>>
+rectangle "OUT-02\n复杂路径规划 / 云端实时调度" as O2 <<requirement>>
+rectangle "OUT-03\n树莓派主脑 / 服务器实时闭环" as O3 <<requirement>>
+rectangle "OUT-04\n自动结账 / 商业级长期部署" as O4 <<requirement>>
+rectangle "OUT-05\n麦轮全向自主跟随作为首版必需" as O5 <<requirement>>
+
+SYS --> R01 : 必须满足
+SYS --> R02 : 必须满足
+SYS --> R03 : 必须满足
+SYS --> R04 : 必须满足
+SYS --> R05 : 必须满足
+SYS --> R06 : 安全约束
+SYS --> R07 : 安全兜底
+SYS --> R08 : 身份约束
+SYS --> R09 : 距离约束
+SYS --> R10 : 风险约束
+SYS --> R11 : 验证入口
+SYS --> R12 : 复盘边界
+SYS --> R13 : 隐私边界
+
+PHONE --> R01
+PHONE --> R02
+PHONE --> R03
+PHONE --> R04
+SIM --> R11
+IDENTITY --> R08
+DECISION --> R06
+DECISION --> R07
+CONTROL --> R09
+CONTROL --> R04
+MCU --> R01
+MCU --> R02
+MCU --> R07
+CHASSIS --> R05
+CHASSIS --> R10
+DIAG --> R12
+DIAG --> R13
+
+R03 --> R08 : 目标身份必须可解释
+R08 --> R06 : 身份不确定先禁止前进
+R06 --> R07 : 搜索失败或风险升高
+R09 --> R04 : 只在距离可信时前进
+R10 --> R07 : 障碍高风险升级
+R11 --> R04 : 先仿真再实车
+
+SYS ..> O1 : 首版排除
+SYS ..> O2 : 首版排除
+SYS ..> O3 : 首版排除
+SYS ..> O4 : 首版排除
+SYS ..> O5 : 首版排除
+
+note bottom of R06
+motion_stop 表示线速度清零、禁止继续前进。
+LOCAL_SEARCH 只允许短时原地低速扫描。
+end note
+
+note bottom of R08
+ReID 只能提高身份信念。
+恢复运动仍需要 track、bbox gate、
+距离状态和安全证据共同通过。
+end note
+
+note bottom of R12
+记录日志开关默认关闭。
+关闭时不生成本地诊断图片或会话文件。
+end note
+@enduml

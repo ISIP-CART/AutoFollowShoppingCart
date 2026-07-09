@@ -2413,4 +2413,114 @@ gallery_candidate_landscape_rate 是否保持 0。
 
 这组指标比单纯观察框颜色更可靠，也能解释“为什么目标黄框不转绿”和“为什么非目标偶发转绿”。
 
+---
+
+## 22. 下一轮 Android 策略修正口径：ReID 转为诊断指标驱动
+
+当前 ReID 主线已经完成从 PC 测试到 Android 实机闭环的关键一步：
+
+```text
+osnet_x0_25 + diverse gallery-k=8
+  -> TFLite Android 推理
+  -> upright crop 修正
+  -> cartfollow_diagnostics 新旧对比
+```
+
+因此下一轮不再优先证明 ReID 是否可用，也不优先更换模型。`osnet_x0_25 + TFLite + upright crop` 已经可以作为 Android 端身份线索；后续重点是让这条身份线索进入更稳的 track/belief/state 逻辑。
+
+本轮 Android 策略修改只聚焦：
+
+```text
+candidate_switch_penalty
+belief_high_bbox_failed
+```
+
+对应工程改法：
+
+1. suspected track 增加滞回，避免每帧最高 ReID 分候选抢占疑似目标。
+2. locked track 增加 ghost memory，目标短时离开后仍保留恢复参考。
+3. bbox gate 分为 loose admission、default confirm 和 strict/default motion gate。
+4. `belief 高但 bbox failed` 时保留身份信念，只阻止运动，不直接否定身份。
+
+每次 Android 策略修改后，都继续用同一套 compare 脚本复盘：
+
+```powershell
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare
+```
+
+验收不看单一绿框现象，而看：
+
+```text
+recovered_rate
+mean_ms_to_follow
+not_recovered_in_window
+candidate_switch_penalty
+belief_high_bbox_failed
+非目标转绿次数
+hard_stop_count
+gallery_candidate_landscape_rate
+```
+
+只有当两个 blocker 下降、`recovered_rate` 不下降、非目标转绿和 hard stop 不增加时，才认为本轮策略真的改善了目标返回与干扰者场景。
+
+---
+
+## 23. 2026-07-09 Android 策略修正已实现，等待新版日志复盘
+
+截至 2026-07-09，本轮 Android 策略修正已完成代码接入。ReID 主结论保持不变：`osnet_x0_25 + TFLite + upright crop` 继续作为身份线索，不优先换模型，也不启用 dynamic gallery。
+
+本轮新增诊断关注点：
+
+```text
+relock_after_recovery
+reid_interest_no_spatial_support
+spatial_support_missing
+```
+
+对应代码行为：
+
+1. **恢复后 relock。**  
+   目标返回后如果以新的临时 `trackId` 出现，且在安全恢复路径中连续通过 motion gate，可晋升为新的 `lockedTrackId`。PC 侧应检查恢复成功后 `trackId == lockedTrackId` 是否成立，并结合 `actionReason=relock_after_recovery` 判断是否完成重新锁定。
+
+2. **非 locked 空间支持门控。**  
+   非 locked track 不能只靠高 ReID 分数进入 suspected。若 `bboxLoose / bboxDefault / prediction / nearLockedGhost` 全 false，则只能记录低强度兴趣信号，不能升到 caution / confirm，也不能进入 FOLLOW。
+
+3. **candidate switch 计数降噪。**  
+   `candidateSwitchCount` 只在真正选中或切换 suspected / selected track 时增长。新版 compare 应重点检查“目标在场 + 干扰者穿越”场景下该指标是否下降。
+
+4. **Human Cart Simulator 日志开关。**  
+   新版 APK 默认不记录 diagnostics。采集 compare 数据前必须手动开启“记录日志”开关；关闭时不会生成 `cartfollow_diagnostics/cart_diag_*` 目录。
+
+下一轮复盘仍使用同一脚本：
+
+```powershell
+python analyze_cartfollow_diagnostics_v1.py ^
+  --compare-roots old=images/cartfollow_diagnostics_old,new=images/cartfollow_diagnostics ^
+  --output outputs/cartfollow_diagnostics_analysis/compare_20260709_relock
+```
+
+建议采集的新版数据仍保持四类短场景：
+
+```text
+目标离开后原目标返回；
+目标离开后干扰者进入；
+目标在场时干扰者穿越；
+短遮挡、蹲下或局部可见后恢复。
+```
+
+合格标准：
+
+```text
+目标返回能 relock；
+干扰者不能仅靠高 ReID 成为 suspected；
+candidate_switch_penalty 下降；
+belief_high_bbox_failed 下降；
+recovered_rate 不下降；
+非目标转绿不增加；
+hard_stop_count 不增加；
+gallery_candidate_landscape_rate 保持 0。
+```
+
 
