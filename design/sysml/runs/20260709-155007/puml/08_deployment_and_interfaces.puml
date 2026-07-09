@@ -1,0 +1,41 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 物理部署与接口图
+
+node "Android 手机" as Phone {
+  component "OpenBot App" as App
+  component "Human Cart Simulator" as Sim
+  component "摄像头/端侧 AI" as AI
+}
+
+node "ESP32 下位机" as ESP32 {
+  component "OpenBot 协议解析" as Proto
+  component "安全管理\n急停/超时/限速" as Safe
+  component "AT8236 适配层" as Adapter
+}
+
+node "AT8236 四路驱动板" as Driver {
+  component "板载协议处理器" as STM
+  component "4 路电机驱动" as MotorDrv
+  component "编码器采集" as Encoder
+}
+
+node "四驱麦轮/差速底盘" as Chassis {
+  component "FL/RL 左侧电机" as LeftMotor
+  component "FR/RR 右侧电机" as RightMotor
+  component "购物筐/载物平台" as Basket
+}
+
+AI --> App : 检测框、身份和距离证据
+App --> Sim : 调试提示和日志
+App --> Proto : USB Serial 或 Bluetooth\nc(left,right), h(interval)
+Proto --> Safe : 解析后的控制量
+Safe --> Adapter : 限幅后的四轮目标速度
+Adapter --> STM : UART 或 I2C
+STM --> MotorDrv : 闭环速度控制
+MotorDrv --> LeftMotor : ctrl_left 映射
+MotorDrv --> RightMotor : ctrl_right 映射
+Encoder --> ESP32 : 可选轮速/状态回传
+Basket .. Chassis : 机械限位 + 快拆 + 防滑
+@enduml

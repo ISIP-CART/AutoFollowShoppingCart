@@ -1,0 +1,40 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 功能与逻辑块定义图
+
+rectangle "购物车跟随系统" as System <<block>>
+rectangle "人机交互" as UI <<block>>
+rectangle "感知证据层" as Perception <<block>>
+rectangle "目标轨迹与身份信念" as Identity <<block>>
+rectangle "距离与风险估计" as Risk <<block>>
+rectangle "行为决策层" as Decision <<block>>
+rectangle "控制执行层" as Execution <<block>>
+rectangle "下位机安全控制" as MCU <<block>>
+rectangle "载物结构" as Basket <<block>>
+rectangle "测试与诊断" as Test <<block>>
+
+System *-- UI
+System *-- Perception
+System *-- Identity
+System *-- Risk
+System *-- Decision
+System *-- Execution
+System *-- MCU
+System *-- Basket
+System *-- Test
+
+rectangle "人物检测适配\n目标初始化\n目标记忆\nReID 特征提取" as PSub <<block>>
+rectangle "短时目标轨迹\n身份信念累积\n锁定目标保护" as ISub <<block>>
+rectangle "图像伺服距离状态\n左中右可通行空间\n系统安全证据" as RSub <<block>>
+rectangle "跟随状态机\n安全融合\n动作仲裁" as DSub <<block>>
+rectangle "控制量生成\n中文动作提示\n底盘控制适配" as ESub <<block>>
+rectangle "OpenBot 协议解析\nAT8236 适配\n急停/超时/限速" as MSub <<block>>
+
+Perception *-- PSub
+Identity *-- ISub
+Risk *-- RSub
+Decision *-- DSub
+Execution *-- ESub
+MCU *-- MSub
+@enduml

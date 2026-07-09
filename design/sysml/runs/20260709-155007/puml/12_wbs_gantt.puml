@@ -1,0 +1,34 @@
+@startuml
+skinparam shadowing false
+title WBS、里程碑与甘特图（2026-07-10 当前进度）
+
+rectangle "WBS 1\n项目管理与建模" as W1 <<block>>
+rectangle "WBS 2\nAndroid 上位机" as W2 <<block>>
+rectangle "WBS 3\nESP32/AT8236 下位机" as W3 <<block>>
+rectangle "WBS 4\n结构与物资" as W4 <<block>>
+rectangle "WBS 5\n联调与安全" as W5 <<block>>
+rectangle "WBS 6\n测试与交付" as W6 <<block>>
+
+rectangle "M1 第1周末\n需求与基础方案收口" as M1 <<requirement>>
+rectangle "M2 第2周末\n上位机策略闭环完成" as M2 <<requirement>>
+rectangle "M3 第3周中前\n真实底盘联调准入" as M3 <<requirement>>
+rectangle "M4 第3周末\n购物车化与安全闭环" as M4 <<requirement>>
+rectangle "M5 第4周末\n最终演示闭环" as M5 <<requirement>>
+
+W1 --> M1
+W2 --> M2
+W3 --> M3
+W4 --> M3
+W5 --> M4
+W4 --> M4
+W5 --> M5
+W6 --> M5
+
+note bottom
+甘特图口径：
+第1周：需求、BOM、OpenBot/下位机方案、第1周材料
+第2周：Human Cart Simulator、Android ReID、diagnostics、track/bbox gate、ESP32/AT8236 实体调试
+第3周：轮向标定、通信超时停车、结构固定、购物筐、极低速真实底盘联调
+第4周：完整联调、测试记录、视频、PPT 和报告
+end note
+@enduml

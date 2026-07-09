@@ -1,0 +1,37 @@
+@startuml
+skinparam shadowing false
+title 安全状态机图
+
+[*] --> IDLE
+IDLE --> MANUAL_CHECK : 启动系统
+MANUAL_CHECK --> CAPTURE_TARGET : 手动遥控通过
+CAPTURE_TARGET --> LOCKED_PENDING_CONFIRM : 采集候选目标
+LOCKED_PENDING_CONFIRM --> CAPTURE_TARGET : 重拍
+LOCKED_PENDING_CONFIRM --> IDLE : 取消
+LOCKED_PENDING_CONFIRM --> CONFIRMED_ARMED : 用户确认
+CONFIRMED_ARMED --> REACQUIRE_TARGET : 用户回到视野
+REACQUIRE_TARGET --> READY_TO_FOLLOW : 多帧稳定匹配
+READY_TO_FOLLOW --> FOLLOW : 倒计时完成
+
+FOLLOW --> FOLLOW_CAUTION : 距离/身份/通路置信度下降
+FOLLOW_CAUTION --> FOLLOW : 证据恢复稳定
+FOLLOW --> MOTION_STOP : 目标丢失或身份不确定
+FOLLOW_CAUTION --> MOTION_STOP : 风险升高
+MOTION_STOP --> LOCAL_SEARCH : 允许短时原地搜索
+LOCAL_SEARCH --> REACQUIRE_TARGET : 重新发现疑似目标
+LOCAL_SEARCH --> HARD_STOP : 搜索超时
+REACQUIRE_TARGET --> FOLLOW_CAUTION : motion gate 通过
+REACQUIRE_TARGET --> MOTION_STOP : belief 高但运动不安全
+
+FOLLOW --> BLOCKED_WAIT : 障碍或左中右通路不确定
+FOLLOW_CAUTION --> BLOCKED_WAIT : 通路风险升高
+BLOCKED_WAIT --> FOLLOW_CAUTION : 风险解除且目标稳定
+
+MANUAL_CHECK --> HARD_STOP : 急停/通信异常
+FOLLOW --> HARD_STOP : 急停/通信异常/程序异常
+FOLLOW_CAUTION --> HARD_STOP : 急停/通信异常/程序异常
+MOTION_STOP --> HARD_STOP : 急停/障碍/通信异常
+LOCAL_SEARCH --> HARD_STOP : 急停/障碍/通信异常
+BLOCKED_WAIT --> HARD_STOP : 急停/通信异常
+HARD_STOP --> IDLE : 人工复位并重新开始
+@enduml

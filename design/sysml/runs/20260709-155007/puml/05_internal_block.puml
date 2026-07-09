@@ -1,0 +1,33 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 内部块与接口图
+
+rectangle "Android 手机\nOpenBot App" as Phone <<block>>
+rectangle "人物检测与 ReID" as Vision <<block>>
+rectangle "目标轨迹/身份信念" as Track <<block>>
+rectangle "距离/障碍/安全证据" as Evidence <<block>>
+rectangle "状态机与行为仲裁" as FSM <<block>>
+rectangle "控制生成" as Control <<block>>
+rectangle "ESP32 下位机" as ESP32 <<block>>
+rectangle "AT8236 驱动板" as Driver <<block>>
+rectangle "四轮底盘" as Chassis <<block>>
+rectangle "诊断日志" as Log <<block>>
+
+Phone --> Vision : 相机帧
+Vision --> Track : 检测框、ReID 分数、margin
+Track --> Evidence : locked/suspected track\nidentity belief
+Evidence --> FSM : DistanceState\nTraversability\nSystemSafety
+FSM --> Control : BehaviorAction
+Control --> ESP32 : c(left,right)\nh(interval)
+ESP32 --> Driver : 四轮速度指令\nUART 或 I2C
+Driver --> Chassis : 电机 PWM/闭环控制
+ESP32 --> Phone : 可选状态回传
+FSM --> Log : 状态、动作、reason
+Track --> Log : track、belief、gate
+
+note bottom of Control
+真实底盘控制尚未接通前，
+Control 先进入 Human Cart Simulator 提示。
+end note
+@enduml
