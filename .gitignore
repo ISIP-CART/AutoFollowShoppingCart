@@ -8,6 +8,9 @@ outputs/
 tmp/
 opencode.json
 
+# Local presentation/report artifacts; may contain private photos and generated figures
+design/report/
+
 # ReID research workspace: keep code/docs, never upload private/raw assets
 tools/reid_pc_test/images/
 tools/reid_pc_test/images_openbot_clean/
