@@ -1,0 +1,30 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 参数与约束图
+
+rectangle "速度参数\n跟随速度 0.3-0.8 m/s\nMAX_FORWARD=0.6" as Speed <<valueType>>
+rectangle "距离参数\n跟随距离 1.0-2.0 m\nheightScale 0.85/1.15" as Distance <<valueType>>
+rectangle "状态机参数\nFOLLOW_LOST_M=10\nREACQUIRE_MATCH_N=8\nSEARCH_TIMEOUT_MS=5000" as StateParam <<valueType>>
+rectangle "通信安全\nh(interval)\nCOMMAND_TIMEOUT_MS=300-500" as Comm <<valueType>>
+rectangle "结构载重\n购物筐 + 1-3 kg\n重心和固定复测" as Load <<valueType>>
+rectangle "电机底盘\n12V 520 编码器电机\n减速比30 空载320rpm" as Motor <<valueType>>
+rectangle "隐私参数\n日志默认关闭\n私人图片/权重/输出不提交" as Privacy <<constraint>>
+
+rectangle "低速跟随控制" as Follow <<block>>
+rectangle "目标丢失安全搜索" as Search <<block>>
+rectangle "ESP32 安全管理" as Safe <<block>>
+rectangle "购物筐结构" as Basket <<block>>
+rectangle "测试与诊断" as Test <<block>>
+
+Speed --> Follow
+Distance --> Follow
+StateParam --> Search
+Comm --> Safe
+Motor --> Safe
+Load --> Basket
+Privacy --> Test
+
+Search --> Safe : 超时后 STOP
+Safe --> Follow : 急停/断连优先级最高
+@enduml

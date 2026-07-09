@@ -1,0 +1,46 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 需求追溯与验证确认图
+
+rectangle "REQ-01\n手动遥控" as R1 <<requirement>>
+rectangle "REQ-02\n目标确认与重识别" as R2 <<requirement>>
+rectangle "REQ-03\n低速跟随" as R3 <<requirement>>
+rectangle "REQ-04\n目标丢失搜索/STOP" as R4 <<requirement>>
+rectangle "REQ-05\n急停与通信异常停车" as R5 <<requirement>>
+rectangle "REQ-06\n购物筐稳定承载" as R6 <<requirement>>
+rectangle "REQ-07\n日志与隐私边界" as R7 <<requirement>>
+
+rectangle "T1\n手动运动测试" as T1 <<block>>
+rectangle "T2\n确认/重拍/取消测试" as T2 <<block>>
+rectangle "T3\n直线/转弯/停下跟随" as T3 <<block>>
+rectangle "T4\n遮挡/离开/返回复测" as T4 <<block>>
+rectangle "T5\n急停/断连视频计时" as T5 <<block>>
+rectangle "T6\n空载/1kg/3kg 负载急停" as T6 <<block>>
+rectangle "T7\n日志开关与目录检查" as T7 <<block>>
+
+rectangle "视频证据" as V <<block>>
+rectangle "测试记录表" as Sheet <<block>>
+rectangle "cartfollow_diagnostics" as Diag <<block>>
+rectangle "结构照片" as Photo <<block>>
+
+R1 --> T1
+R2 --> T2
+R3 --> T3
+R4 --> T4
+R5 --> T5
+R6 --> T6
+R7 --> T7
+T1 --> V
+T1 --> Sheet
+T2 --> V
+T3 --> V
+T3 --> Sheet
+T4 --> Diag
+T4 --> V
+T5 --> V
+T5 --> Sheet
+T6 --> Photo
+T6 --> Sheet
+T7 --> Diag
+@enduml

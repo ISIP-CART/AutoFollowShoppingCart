@@ -1,0 +1,28 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 方案权衡与约束图
+
+rectangle "方案 A\n大型底盘直接承载" as A <<block>>
+rectangle "方案 B\n牵引式购物筐" as B <<block>>
+rectangle "方案 C\n竞赛底盘 + 模块化购物筐" as C <<block>>
+
+rectangle "预算约束\n核心平台尽量 1500-3000 元" as Cost <<constraint>>
+rectangle "周期约束\n4 周集中实践" as Time <<constraint>>
+rectangle "安全约束\n低速、急停、失联停车" as Safety <<constraint>>
+rectangle "架构约束\nOpenBot + Android + ESP32/MCU" as Arch <<constraint>>
+rectangle "采购约束\n成熟模块和快速到货" as Proc <<constraint>>
+
+A ..> Cost : 成本偏高
+A ..> Time : 到货/适配风险
+B ..> Safety : 转弯和摆动风险
+B ..> Time : 联调复杂
+C ..> Cost : 成本可控
+C ..> Time : 周期匹配
+C ..> Safety : 低速差速更可预测
+C ..> Arch : 复用 OpenBot 主线
+C ..> Proc : 可采购性较好
+
+rectangle "当前推荐\n采用方案 C\n首版缩比原型验证" as Choice <<requirement>>
+C --> Choice
+@enduml

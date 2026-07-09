@@ -1,0 +1,27 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 系统上下文图
+
+actor "目标用户" as User
+actor "组员/操作员" as Operator
+actor "课程教师/助教" as Teacher
+actor "路人/非目标行人" as Bystander
+
+rectangle "自主跟随购物车原型系统" as System <<block>>
+rectangle "室内超市或模拟场地" as Env <<block>>
+rectangle "项目文档与测试证据" as Evidence <<block>>
+
+User --> System : 被确认为跟随目标\n慢速行走/停下/转弯
+Operator --> System : 启动/确认/重拍/急停/记录日志
+Teacher --> Evidence : 检查需求、架构、测试和演示
+Bystander --> System : 可能遮挡或干扰目标
+System --> Env : 低速移动\n不依赖 SLAM 或高精地图
+System --> Evidence : 输出状态、日志、视频和测试记录
+
+note right of System
+首版主线：
+OpenBot + Android 手机 + ESP32/MCU + 差速底盘
+目标丢失先 motion_stop，再短时原地搜索，失败后 STOP
+end note
+@enduml
