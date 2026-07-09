@@ -1,0 +1,38 @@
+# Local environment and Python caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Depth Anything V2 local runtime outputs
+Depth-Anything-V2/checkpoints/
+Depth-Anything-V2/inputs/
+Depth-Anything-V2/outputs/
+Depth-Anything-V2/video_inputs/
+Depth-Anything-V2/video_outputs/
+
+# Private or bulky experiment assets
+images/
+outputs/
+weights/
+checkpoints/
+depth_raw/
+depth_vis/
+logs/
+runs/
+
+# Model weights and converted model artifacts
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tflite
+*.engine
+*.bin
+
+# Local notes generated during experiments
+*.tmp
+*.log
