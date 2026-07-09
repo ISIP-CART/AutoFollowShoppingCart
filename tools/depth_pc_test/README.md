@@ -96,3 +96,51 @@ The first review should answer:
 2. Are left / right passage openings visible in shelf-corner scenes?
 3. Are there obvious failure cases such as shelf gaps, glass, reflective floors, or people being mistaken for open passage?
 ```
+
+## Round 1 Status
+
+Round 1 has been run locally with Depth Anything V2 Small (`vits`) on 18 PC-side test images:
+
+```text
+inputs/corridor: 6
+inputs/shelf_corner_left: 7
+inputs/shelf_corner_right: 5
+```
+
+Generated images and CSV files remain under ignored `Depth-Anything-V2/outputs/`.
+
+The qualitative result is promising: far corridor space is generally separated from nearby walls, columns, and floor regions. However, the first fixed-ROI scoring heuristic is not stable enough for behavior decisions.
+
+## Passage Score Prototype
+
+The tracked helper script is:
+
+```text
+tools/depth_pc_test/scripts/passage_score.py
+```
+
+Run it from the project root after Round 1 grayscale depth images exist:
+
+```powershell
+& 'D:\miniconda3\envs\depth_pc_test\python.exe' tools\depth_pc_test\scripts\passage_score.py `
+  --depth-dir tools\depth_pc_test\Depth-Anything-V2\outputs\round1_gray `
+  --input-root tools\depth_pc_test\Depth-Anything-V2\inputs `
+  --labels tools\depth_pc_test\labels\round1_manual_labels.csv `
+  --outdir tools\depth_pc_test\Depth-Anything-V2\outputs\round2_passage_score
+```
+
+It writes ignored outputs:
+
+```text
+passage_scores.csv
+summary.json
+overlays/*.png
+```
+
+The first passage-score report is tracked at:
+
+```text
+tools/depth_pc_test/docs/round1_passage_score_report.md
+```
+
+Keep `Depth-Anything-V2/inputs/`, `Depth-Anything-V2/outputs/`, and `Depth-Anything-V2/checkpoints/` private and uncommitted.
