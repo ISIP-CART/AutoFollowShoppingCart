@@ -1,0 +1,48 @@
+@startuml
+skinparam shadowing false
+title 跟随活动图
+
+start
+:启动系统;
+:手动遥控检查底盘和通信;
+if ("检查通过?") then ("是")
+  :点击开始跟随;
+  :采集候选目标和截图;
+  if ("用户确认?") then ("确认")
+    :车辆保持停止;
+    :用户回到车前视野;
+    :连续重识别目标;
+    if ("身份、距离、安全均稳定?") then ("是")
+      :倒计时;
+      :进入 FOLLOW;
+      while ("演示继续?")
+        :检测目标、估计距离与风险;
+        if ("急停或通信异常?") then ("是")
+          :发送 STOP;
+          stop
+        elseif ("目标丢失或身份不确定?") then ("是")
+          :motion_stop，取消线速度;
+          :LOCAL_SEARCH 原地低速搜索;
+          if ("超时或风险升高?") then ("是")
+            :发送 STOP;
+            stop
+          else ("找回目标")
+            :REACQUIRE 多帧确认;
+          endif
+        elseif ("障碍或通路不确定?") then ("是")
+          :BLOCKED_WAIT 或低速局部避障;
+        else ("安全")
+          :低速跟随;
+        endif
+      endwhile
+    else ("否")
+      :保持停止并提示重新进入视野;
+    endif
+  else ("重拍/取消")
+    :回到采集或 IDLE;
+  endif
+else ("否")
+  :修复底盘/通信问题;
+endif
+stop
+@enduml

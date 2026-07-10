@@ -1,0 +1,45 @@
+{
+  "run_id": "20260709-155007",
+  "purpose": "Complete Tuesday detailed system design requirements with SysML-style modeling artifacts.",
+  "sources": [
+    "AGENTS.md",
+    "README.md",
+    "design/structure.md",
+    "design/自主跟随购物车上位机软件开发计划.md",
+    "design/上位机软件开发 Phase 2——修正跟随距离控制计划书.md",
+    "design/障碍处理计划书.md",
+    "design/OpenBot与四驱麦轮AT8236下位机适配风险说明.md",
+    "design/工程决策与实现策略记录.md",
+    "dev/OpenBot/android/cartfollow-devlog.md",
+    "design/采购.md",
+    "design/doc/产品参数信息汇总报告.md",
+    "design/sysml/skills/autofollow-sysml-modeler/SKILL.md",
+    "design/sysml/skills/autofollow-sysml-modeler/references/diagram-catalog.md",
+    "design/sysml/skills/autofollow-sysml-modeler/references/plantuml-safe-patterns.md",
+    "D:/xwechat_files/wxid_n8ckm3ks7d0x22_b849/temp/RWTemp/2026-07/d7de00d63b327dad7caa322591c5ef80.jpg"
+  ],
+  "skipped_private_or_heavy_paths": [
+    ".git/",
+    "build outputs",
+    "tools/reid_pc_test/images*/",
+    "tools/reid_pc_test/outputs/",
+    "tools/reid_pc_test/weights/"
+  ],
+  "outputs": [
+    "design/sysml/sysml-modeling.md",
+    "design/sysml/runs/20260709-155007/puml/01_context.puml",
+    "design/sysml/runs/20260709-155007/puml/02_use_cases.puml",
+    "design/sysml/runs/20260709-155007/puml/03_requirements.puml",
+    "design/sysml/runs/20260709-155007/puml/04_block_definition.puml",
+    "design/sysml/runs/20260709-155007/puml/05_internal_block.puml",
+    "design/sysml/runs/20260709-155007/puml/06_follow_activity.puml",
+    "design/sysml/runs/20260709-155007/puml/07_safety_state_machine.puml",
+    "design/sysml/runs/20260709-155007/puml/08_deployment_and_interfaces.puml",
+    "design/sysml/runs/20260709-155007/puml/09_tradeoff_constraints.puml",
+    "design/sysml/runs/20260709-155007/puml/10_traceability_validation.puml",
+    "design/sysml/runs/20260709-155007/puml/11_param_constraints.puml",
+    "design/sysml/runs/20260709-155007/puml/12_wbs_gantt.puml",
+    "design/sysml/runs/20260709-155007/generation-report.md",
+    "design/sysml/runs/20260709-155007/source-manifest.json"
+  ]
+}

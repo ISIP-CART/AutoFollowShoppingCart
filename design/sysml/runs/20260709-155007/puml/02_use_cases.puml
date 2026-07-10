@@ -1,0 +1,38 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 用例图
+
+actor "目标用户" as User
+actor "组员/操作员" as Operator
+actor "课程教师/助教" as Teacher
+
+rectangle "自主跟随购物车原型" {
+  usecase "手动遥控底盘" as UC1
+  usecase "采集候选目标" as UC2
+  usecase "确认目标身份" as UC3
+  usecase "确认后重识别启动" as UC4
+  usecase "低速自主跟随" as UC5
+  usecase "目标丢失安全搜索" as UC6
+  usecase "障碍减速/等待" as UC7
+  usecase "急停与通信异常停车" as UC8
+  usecase "记录测试日志与视频" as UC9
+  usecase "展示周二设计材料" as UC10
+}
+
+Operator --> UC1
+Operator --> UC2
+Operator --> UC3
+User --> UC4
+User --> UC5
+System --> UC6
+System --> UC7
+Operator --> UC8
+Operator --> UC9
+Teacher --> UC10
+
+UC2 --> UC3 : 候选截图
+UC3 --> UC4 : 用户确认后仍保持停止
+UC5 --> UC6 : 连续未匹配
+UC6 --> UC8 : 搜索超时或安全异常
+@enduml

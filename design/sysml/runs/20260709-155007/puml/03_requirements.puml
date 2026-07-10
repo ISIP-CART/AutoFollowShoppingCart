@@ -1,0 +1,32 @@
+@startuml
+left to right direction
+skinparam shadowing false
+title 首版需求图
+
+rectangle "REQ-01\nOpenBot 基础链路跑通" as R1 <<requirement>>
+rectangle "REQ-02\n手机端可手动遥控底盘" as R2 <<requirement>>
+rectangle "REQ-03\n人物检测、目标确认与锁定" as R3 <<requirement>>
+rectangle "REQ-04\n低速自主跟随" as R4 <<requirement>>
+rectangle "REQ-05\n购物筐或载物平台集成" as R5 <<requirement>>
+rectangle "REQ-06\n目标丢失先取消前进\n再短时原地搜索" as R6 <<requirement>>
+rectangle "REQ-07\n搜索失败、急停、障碍、通信异常后 STOP" as R7 <<requirement>>
+rectangle "REQ-08\nReID 只作身份置信辅助" as R8 <<requirement>>
+rectangle "REQ-09\n初始化距离标定 + 图像伺服" as R9 <<requirement>>
+rectangle "REQ-10\n左/中/右可通行空间与低速局部避障" as R10 <<requirement>>
+rectangle "REQ-11\nHuman Cart Simulator 支撑无底盘验证" as R11 <<requirement>>
+rectangle "REQ-12\n诊断日志默认关闭，按需记录" as R12 <<requirement>>
+rectangle "REQ-13\n隐私图片、权重和输出不提交" as R13 <<requirement>>
+
+rectangle "非首版目标\nSLAM/复杂规划/云端调度/树莓派主脑/自动结账" as NG <<constraint>>
+
+R1 --> R2
+R2 --> R4
+R3 --> R4
+R6 --> R7
+R8 --> R3
+R9 --> R4
+R10 --> R7
+R11 --> R3
+R12 --> R13
+NG ..> R1 : 范围约束
+@enduml
