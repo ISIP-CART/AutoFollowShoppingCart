@@ -1,55 +1,55 @@
 image,scene,candidate_action,expected_verdict,label_confidence,note
-IMG_20260708_233744,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260708_233744,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260708_233744,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101654,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101654,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101654,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101717,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101717,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101717,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101724,shelf_corner_right,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101724,shelf_corner_right,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101724,shelf_corner_right,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101735,shelf_corner_right,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101735,shelf_corner_right,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101735,shelf_corner_right,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101747,shelf_corner_right,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101747,shelf_corner_right,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101747,shelf_corner_right,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101811,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101811,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101811,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101827,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101827,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101827,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101841,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101841,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101841,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101915,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101915,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101915,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101952,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101952,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_101952,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102004,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102004,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102004,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102012,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102012,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102012,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102020,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102020,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102020,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102031,shelf_corner_left,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102031,shelf_corner_left,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102031,shelf_corner_left,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102046,shelf_corner_right,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102046,shelf_corner_right,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102046,shelf_corner_right,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102104,shelf_corner_right,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102104,shelf_corner_right,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102104,shelf_corner_right,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102247,corridor,SHORT_FORWARD_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102247,corridor,LEFT_ARC_CAUTION,REVIEW,todo,manual review required
-IMG_20260709_102247,corridor,RIGHT_ARC_CAUTION,REVIEW,todo,manual review required
+"IMG_20260708_233744","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","medium","为较为空旷的走廊，可以直行，但从画面来看小车位置偏左、一直向前可能会撞到左边墙上"
+"IMG_20260708_233744","corridor","LEFT_ARC_CAUTION","VETO_STOP","high","左边就是墙"
+"IMG_20260708_233744","corridor","RIGHT_ARC_CAUTION","ALLOW_CAUTION","low","为较为空旷的走廊，由于走廊宽度较宽、镜头画面表明小车偏左，所以右边有一定可行的试探空间，但走廊本质是前后方向的，无右边岔路"
+"IMG_20260709_101654","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high","前后方向的走廊宽度足够且小车在中间"
+"IMG_20260709_101654","corridor","LEFT_ARC_CAUTION","VETO_STOP","medium","左边就是墙，尽管还有一点点由于走廊宽度导致的试探空间"
+"IMG_20260709_101654","corridor","RIGHT_ARC_CAUTION","VETO_STOP","medium","右边就是墙，尽管还有一点点由于走廊宽度导致的试探空间"
+"IMG_20260709_101717","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high","前方较短区域内无障碍，拐角在左侧，路径不会撞上去"
+"IMG_20260709_101717","shelf_corner_left","LEFT_ARC_CAUTION","ALLOW_CAUTION","low","拐角在左侧，路径有可能会撞上拐角，但重合区域不大"
+"IMG_20260709_101717","shelf_corner_left","RIGHT_ARC_CAUTION","ALLOW_CAUTION","high","前方右边较短区域内无障碍，拐角在左侧，路径不会撞上去"
+"IMG_20260709_101724","shelf_corner_right","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high","前方较短区域内无障碍，拐角在右侧，路径不会撞上去"
+"IMG_20260709_101724","shelf_corner_right","LEFT_ARC_CAUTION","ALLOW_CAUTION","high","前方左侧较短区域内无障碍，拐角在右侧，路径不会撞上去"
+"IMG_20260709_101724","shelf_corner_right","RIGHT_ARC_CAUTION","VETO_STOP","medium","路径有可能会撞上拐角"
+"IMG_20260709_101735","shelf_corner_right","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high","无障碍"
+"IMG_20260709_101735","shelf_corner_right","LEFT_ARC_CAUTION","ALLOW_CAUTION","high","无障碍"
+"IMG_20260709_101735","shelf_corner_right","RIGHT_ARC_CAUTION","ALLOW_CAUTION","medium","包络提醒区域与右边拐角轻微接触，有一定风险"
+"IMG_20260709_101747","shelf_corner_right","SHORT_FORWARD_CAUTION","REVIEW","high","无障碍"
+"IMG_20260709_101747","shelf_corner_right","LEFT_ARC_CAUTION","REVIEW","high","无障碍"
+"IMG_20260709_101747","shelf_corner_right","RIGHT_ARC_CAUTION","UNCLEAR","medium","不好判断"
+"IMG_20260709_101811","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101811","shelf_corner_left","LEFT_ARC_CAUTION","VETO_STOP","todo","离岔路口有点远"
+"IMG_20260709_101811","shelf_corner_left","RIGHT_ARC_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101827","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101827","shelf_corner_left","LEFT_ARC_CAUTION","UNCLEAR","todo","不好判断"
+"IMG_20260709_101827","shelf_corner_left","RIGHT_ARC_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101841","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101841","corridor","LEFT_ARC_CAUTION","VETO_STOP","medium","左右都是墙"
+"IMG_20260709_101841","corridor","RIGHT_ARC_CAUTION","VETO_STOP","medium","左右都是墙"
+"IMG_20260709_101915","shelf_corner_left","SHORT_FORWARD_CAUTION","VETO_STOP","high","直行撞上拐角"
+"IMG_20260709_101915","shelf_corner_left","LEFT_ARC_CAUTION","VETO_STOP","high","直接左转撞上拐角"
+"IMG_20260709_101915","shelf_corner_left","RIGHT_ARC_CAUTION","REVIEW","medium","最理想的避障方式就是先略微走一小段右转再左转"
+"IMG_20260709_101952","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_101952","corridor","LEFT_ARC_CAUTION","VETO_STOP","high","左右都是墙，前面岔路口较远"
+"IMG_20260709_101952","corridor","RIGHT_ARC_CAUTION","VETO_STOP","high","左右都是墙，前面岔路口较远"
+"IMG_20260709_102004","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_102004","shelf_corner_left","LEFT_ARC_CAUTION","ALLOW_CAUTION","high","前面较近处是左边岔路口"
+"IMG_20260709_102004","shelf_corner_left","RIGHT_ARC_CAUTION","VETO_STOP","medium","右边是墙"
+"IMG_20260709_102012","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_102012","corridor","LEFT_ARC_CAUTION","VETO_STOP","high",""
+"IMG_20260709_102012","corridor","RIGHT_ARC_CAUTION","VETO_STOP","high",""
+"IMG_20260709_102020","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","low","直行会撞墙，但短时间内撞不上"
+"IMG_20260709_102020","shelf_corner_left","LEFT_ARC_CAUTION","ALLOW_CAUTION","low","左转实际弧度如果足够大可以左转，因为现在就处于岔路口，可以左转，但图中包络区域看起来与前面的墙重合了"
+"IMG_20260709_102020","shelf_corner_left","RIGHT_ARC_CAUTION","ALLOW_CAUTION","low","右转实际弧度大就会撞墙，弧度小就不会"
+"IMG_20260709_102031","shelf_corner_left","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102031","shelf_corner_left","LEFT_ARC_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102031","shelf_corner_left","RIGHT_ARC_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102046","shelf_corner_right","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102046","shelf_corner_right","LEFT_ARC_CAUTION","ALLOW_CAUTION","low",""
+"IMG_20260709_102046","shelf_corner_right","RIGHT_ARC_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102104","shelf_corner_right","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102104","shelf_corner_right","LEFT_ARC_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102104","shelf_corner_right","RIGHT_ARC_CAUTION","ALLOW_CAUTION","medium",""
+"IMG_20260709_102247","corridor","SHORT_FORWARD_CAUTION","ALLOW_CAUTION","high",""
+"IMG_20260709_102247","corridor","LEFT_ARC_CAUTION","VETO_STOP","high",""
+"IMG_20260709_102247","corridor","RIGHT_ARC_CAUTION","VETO_STOP","medium",""

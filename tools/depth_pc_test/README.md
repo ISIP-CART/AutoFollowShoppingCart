@@ -143,20 +143,36 @@ The first passage-score report is tracked at:
 tools/depth_pc_test/docs/round1_passage_score_report.md
 ```
 
-## Traversability Score Prototype
+## Legacy Traversability Pilot
 
-The preferred PC-side scoring prototype is now:
+The first action-scoring pilot used an earlier version of:
 
 ```text
 tools/depth_pc_test/scripts/traversability_score.py
 ```
 
-It does not classify scene topology. It evaluates candidate short motions:
+with translated image-space trapezoids for:
 
 ```text
 SHORT_FORWARD_CAUTION
 LEFT_ARC_CAUTION
 RIGHT_ARC_CAUTION
+```
+
+The completed human review is preserved in
+`labels/round1_traversability_labels.csv`. It produced 49 evaluable rows and a
+legacy heuristic match rate of 38.8%, but the action geometry was too abstract
+for this to count as model accuracy. See
+`docs/round1_traversability_score_report.md`.
+
+## Physical Motion Prototype
+
+The current prototype uses explicit actions:
+
+```text
+PROBE_FORWARD_20CM
+PIVOT_LEFT_20DEG
+PIVOT_RIGHT_20DEG
 ```
 
 and outputs a conservative verdict:
@@ -173,8 +189,9 @@ Run it from the project root after Round 1 grayscale depth images exist:
 & 'D:\miniconda3\envs\depth_pc_test\python.exe' tools\depth_pc_test\scripts\traversability_score.py `
   --depth-dir tools\depth_pc_test\Depth-Anything-V2\outputs\round1_gray `
   --input-root tools\depth_pc_test\Depth-Anything-V2\inputs `
-  --labels tools\depth_pc_test\labels\round1_traversability_labels.csv `
-  --outdir tools\depth_pc_test\Depth-Anything-V2\outputs\round3_traversability_score
+  --labels tools\depth_pc_test\labels\round2_motion_labels.csv `
+  --config tools\depth_pc_test\config\provisional_motion_geometry.json `
+  --outdir tools\depth_pc_test\Depth-Anything-V2\outputs\round4_physical_motion
 ```
 
 It writes ignored outputs:
@@ -182,21 +199,38 @@ It writes ignored outputs:
 ```text
 traversability_scores.csv
 summary.json
-overlays/*.png
+storyboards/*.png
 ```
 
 The manual label interface is tracked at:
 
 ```text
-tools/depth_pc_test/labels/round1_traversability_labels.csv
+tools/depth_pc_test/labels/round2_motion_labels.csv
 ```
 
-Rows are initially marked `REVIEW`, so a human can later label each candidate action as `ALLOW_CAUTION`, `VETO_STOP`, or `UNCLEAR` after checking the overlays.
+Rows are initially marked `REVIEW`. Do not label them until the provisional
+camera geometry has been replaced or explicitly accepted for a UI-only trial.
 
-The first traversability report is tracked at:
+For image-first manual review, generate a private offline labeling page:
+
+```powershell
+& 'D:\miniconda3\envs\depth_pc_test\python.exe' tools\depth_pc_test\scripts\generate_traversability_label_page.py `
+  --labels tools\depth_pc_test\labels\round2_motion_labels.csv `
+  --input-root tools\depth_pc_test\Depth-Anything-V2\inputs `
+  --overlay-dir tools\depth_pc_test\Depth-Anything-V2\outputs\round4_physical_motion\storyboards `
+  --output tools\depth_pc_test\Depth-Anything-V2\outputs\round4_physical_motion\labeling.html
+```
+
+Open `labeling.html` in a browser. Each action card shows an RGB/depth/top-down
+storyboard, supports optional reason-code checkboxes, saves on every edit, and
+reports whether any `REVIEW` rows remain. Exported CSV is compatible with the
+current scorer. Keep the HTML beside the generated outputs so its local image
+links remain valid.
+
+The current physical-motion report is tracked at:
 
 ```text
-tools/depth_pc_test/docs/round1_traversability_score_report.md
+tools/depth_pc_test/docs/round2_physical_motion_report.md
 ```
 
 Keep `Depth-Anything-V2/inputs/`, `Depth-Anything-V2/outputs/`, and `Depth-Anything-V2/checkpoints/` private and uncommitted.

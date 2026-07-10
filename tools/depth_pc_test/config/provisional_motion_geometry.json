@@ -1,0 +1,14 @@
+{
+  "vehicle_width_m": 0.305,
+  "vehicle_length_m": 0.4,
+  "safety_margin_m": 0.05,
+  "camera_height_m": 0.65,
+  "camera_pitch_deg": 12.0,
+  "camera_hfov_deg": 70.0,
+  "camera_forward_offset_m": 0.0,
+  "probe_forward_m": 0.2,
+  "pivot_deg": 20.0,
+  "pose_samples": 7,
+  "row_residual_threshold": 0.08,
+  "severe_residual_threshold": 0.16
+}

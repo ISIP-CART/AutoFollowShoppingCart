@@ -1,6 +1,7 @@
 # Round 1 Traversability Score Report
 
 Date: 2026-07-09
+Manual review completed: 2026-07-10
 
 ## Purpose
 
@@ -40,7 +41,11 @@ Total scored rows:
 54
 ```
 
-## Command
+## Historical Command
+
+This command records the Round 1 interface. The tracked scorer has since moved
+to the Round 2 physical-motion interface and now requires `--config`; use Git
+commit `f5ad339` only if exact legacy reproduction is required.
 
 Run from the project root:
 
@@ -106,13 +111,26 @@ LEFT_ARC_CAUTION: ALLOW_CAUTION 7, UNCLEAR 9, VETO_STOP 2
 RIGHT_ARC_CAUTION: ALLOW_CAUTION 7, UNCLEAR 10, VETO_STOP 1
 ```
 
-Labeled rows:
+Initial labeled rows:
 
 ```text
 0
 ```
 
-Therefore the current match rate is intentionally `null`.
+The tracked CSV was later replaced with the actual exported human review. The
+post-review audit contains:
+
+```text
+54 total rows
+49 evaluable ALLOW_CAUTION / VETO_STOP rows
+3 REVIEW rows
+2 UNCLEAR rows
+overall heuristic match rate: 0.3878
+high-confidence match rate: 0.2800 (7 / 25)
+```
+
+These rates describe the legacy trapezoid experiment only. They are not a
+Depth Anything V2 accuracy measurement.
 
 ## Label Interface
 
@@ -122,7 +140,8 @@ The tracked manual-label file is:
 tools/depth_pc_test/labels/round1_traversability_labels.csv
 ```
 
-It currently contains one row for each image and candidate action. All rows are intentionally left as:
+It now preserves the first human review exactly as exported. The remaining
+`REVIEW` and `UNCLEAR` rows are intentionally not filled in after the fact.
 
 ```text
 expected_verdict = REVIEW
@@ -177,7 +196,13 @@ otherwise -> UNCLEAR
 
 ## Interpretation
 
-This round should not be used to claim an accuracy number yet, because the label file still needs manual review.
+This round must not be used to claim a model accuracy number. Manual review
+showed that the three image-space trapezoids did not define vehicle motion well
+enough: left and right actions looked like translated copies, while their
+distance, turn radius, body orientation, and swept area were unspecified.
+
+The low match rate and increasingly sparse notes therefore diagnose an
+experiment-definition problem before they diagnose a depth-model problem.
 
 The main engineering conclusion is that the PC prototype now has a better interface:
 
@@ -195,4 +220,7 @@ This keeps the future Android module aligned with the current Human Cart Simulat
 
 ## Next Step
 
-Before Android work, manually review `round3_traversability_score/overlays/` and fill `round1_traversability_labels.csv`. Then rerun the script and check whether the heuristic agrees with the human verdicts often enough to justify tuning thresholds or adding temporal smoothing.
+This experiment is frozen as a structure-and-label-interface pilot. Round 2
+replaces translated trapezoids with configurable physical motion primitives and
+keeps its labels in a separate CSV. Do not tune the old thresholds or reuse the
+arc labels as ground truth for the new pivot actions.
