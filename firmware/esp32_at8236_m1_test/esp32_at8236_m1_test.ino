@@ -58,21 +58,24 @@ static const int MOTOR_TX = 17;
 
 static const int MOTOR_BAUD = 115200;
 static const int TEST_SPEED = 80;
-static const int CHASSIS_TEST_SPEED = 28;
-static const int TURN_TEST_SPEED = 26;
-static const int STRAFE_TEST_SPEED = 34;
+// Ground-driving speeds: 26--34 was enough with the chassis suspended, but
+// often could not overcome roller and floor static friction.
+static const int CHASSIS_TEST_SPEED = 52;
+static const int TURN_TEST_SPEED = 48;
+static const int STRAFE_TEST_SPEED = 68;
 static const int MAX_MOTOR_SPEED = 100;
-static const int CONTROL_RAMP_STEP = 2;
+// Reach useful torque promptly, while retaining a small soft-start.
+static const int CONTROL_RAMP_STEP = 6;
 static const unsigned long SINGLE_MOTOR_TEST_MS = 800;
 static const unsigned long CHASSIS_TEST_MS = 700;
-static const int RAMP_STEP = 2;
-static const unsigned long RAMP_STEP_MS = 120;
+static const int RAMP_STEP = 5;
+static const unsigned long RAMP_STEP_MS = 60;
 static const unsigned long AUTONOMOUS_START_DELAY_MS = 5000;
 static const unsigned long DEFAULT_COMMAND_TIMEOUT_MS = 500;
 static const int TEST_PWM = 1700;
 static const char *WIFI_AP_SSID = "CartESP32";
 static const char *WIFI_AP_PASS = "cart12345";
-static const unsigned long CONTROL_UPDATE_MS = 50;
+static const unsigned long CONTROL_UPDATE_MS = 40;
 static const byte DNS_PORT = 53;
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_GATEWAY(192, 168, 4, 1);
@@ -96,31 +99,13 @@ static const int M4_TRIM_PERCENT = 100;
 //   M3 = left front, M4 = right front
 //   M1 = left rear,  M2 = right rear
 //
-// The first chassis test showed the original forward vector was reversed:
-//   old w:  M1-, M2+, M3+, M4-  moved backward
-//   old x:  M1+, M2-, M3-, M4+  moved forward
-// Keep the command constants aligned with the observed chassis motion.
-static const int M1_FORWARD = CHASSIS_TEST_SPEED;
-static const int M2_FORWARD = -CHASSIS_TEST_SPEED;
-static const int M3_FORWARD = -CHASSIS_TEST_SPEED;
-static const int M4_FORWARD = CHASSIS_TEST_SPEED;
-
-// Differential turn vectors:
-//   left turn = left wheels backward, right wheels forward
-//   M3/M1 are left side, M4/M2 are right side
-static const int M1_TURN_LEFT = -TURN_TEST_SPEED;
-static const int M2_TURN_LEFT = -TURN_TEST_SPEED;
-static const int M3_TURN_LEFT = TURN_TEST_SPEED;
-static const int M4_TURN_LEFT = TURN_TEST_SPEED;
-
-// Mecanum strafe vectors for the wheel layout shown in the KudRobot diagram:
-//   right strafe = LF forward, RF backward, LR backward, RR forward
-// With the measured signs above, that becomes all motors negative.
-// If h/l are reversed on your chassis, swap the two command handlers only.
-static const int M1_STRAFE_LEFT = STRAFE_TEST_SPEED;
-static const int M2_STRAFE_LEFT = STRAFE_TEST_SPEED;
-static const int M3_STRAFE_LEFT = STRAFE_TEST_SPEED;
-static const int M4_STRAFE_LEFT = STRAFE_TEST_SPEED;
+// Motor command signs required for a wheel to drive the cart forward. Keep
+// these four values as the only direction-calibration point after rewiring.
+// Wheel placement: M3=left-front, M4=right-front, M1=left-rear, M2=right-rear.
+static const int M1_FORWARD_SIGN = 1;
+static const int M2_FORWARD_SIGN = -1;
+static const int M3_FORWARD_SIGN = -1;
+static const int M4_FORWARD_SIGN = 1;
 
 bool verboseEcho = false;
 bool printMotorFrames = false;
@@ -428,15 +413,17 @@ void setWheelTargetsRaw(int m1, int m2, int m3, int m4) {
   targetM4 = m4;
 }
 
-void mixChassisToWheelTargets(int vx, int vy, int wz) {
+void mixChassisToWheels(int vx, int vy, int wz, int &m1, int &m2, int &m3, int &m4) {
   vx = constrain(vx, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
   vy = constrain(vy, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
   wz = constrain(wz, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
 
-  int m1 = vx + vy - wz;
-  int m2 = -vx + vy - wz;
-  int m3 = -vx + vy + wz;
-  int m4 = vx + vy + wz;
+  // Canonical motion is converted to each motor's measured forward sign here.
+  // Thus F/B, L/R, SL/SR and !M all use exactly the same wheel convention.
+  m1 = M1_FORWARD_SIGN * (vx + vy - wz);  // left rear
+  m2 = M2_FORWARD_SIGN * (vx - vy + wz);  // right rear
+  m3 = M3_FORWARD_SIGN * (vx - vy - wz);  // left front
+  m4 = M4_FORWARD_SIGN * (vx + vy + wz);  // right front
 
   int maxAbs = max(max(abs(m1), abs(m2)), max(abs(m3), abs(m4)));
   if (maxAbs > MAX_MOTOR_SPEED) {
@@ -446,6 +433,11 @@ void mixChassisToWheelTargets(int vx, int vy, int wz) {
     m4 = (m4 * MAX_MOTOR_SPEED) / maxAbs;
   }
 
+}
+
+void mixChassisToWheelTargets(int vx, int vy, int wz) {
+  int m1, m2, m3, m4;
+  mixChassisToWheels(vx, vy, wz, m1, m2, m3, m4);
   setWheelTargetsRaw(m1, m2, m3, m4);
 }
 
@@ -552,6 +544,12 @@ void softChassisMove(int m1Target, int m2Target, int m3Target, int m4Target, con
   Serial.println("Soft move stopped.");
 }
 
+void softChassisCommand(int vx, int vy, int wz, const char *label, unsigned long cruiseMs) {
+  int m1, m2, m3, m4;
+  mixChassisToWheels(vx, vy, wz, m1, m2, m3, m4);
+  softChassisMove(m1, m2, m3, m4, label, cruiseMs);
+}
+
 void delayedGentleDemo() {
   Serial.println("Gentle demo will start in 5 seconds. Keep the cart clear.");
   stopAllMotors();
@@ -567,9 +565,9 @@ void delayedGentleDemo() {
     }
   }
 
-  softChassisMove(M1_FORWARD, M2_FORWARD, M3_FORWARD, M4_FORWARD, "gentle demo forward", CHASSIS_TEST_MS);
+  softChassisCommand(CHASSIS_TEST_SPEED, 0, 0, "gentle demo forward", CHASSIS_TEST_MS);
   delay(800);
-  softChassisMove(-M1_FORWARD, -M2_FORWARD, -M3_FORWARD, -M4_FORWARD, "gentle demo backward", CHASSIS_TEST_MS);
+  softChassisCommand(-CHASSIS_TEST_SPEED, 0, 0, "gentle demo backward", CHASSIS_TEST_MS);
 }
 
 int tokenToInt(const String &cmd, int tokenIndex) {
@@ -838,12 +836,12 @@ void processHostCommand(String cmd) {
 
     case 'w':
     case 'W':
-      softChassisMove(M1_FORWARD, M2_FORWARD, M3_FORWARD, M4_FORWARD, "chassis forward", CHASSIS_TEST_MS);
+      softChassisCommand(CHASSIS_TEST_SPEED, 0, 0, "chassis forward", CHASSIS_TEST_MS);
       break;
 
     case 'x':
     case 'X':
-      softChassisMove(-M1_FORWARD, -M2_FORWARD, -M3_FORWARD, -M4_FORWARD, "chassis backward", CHASSIS_TEST_MS);
+      softChassisCommand(-CHASSIS_TEST_SPEED, 0, 0, "chassis backward", CHASSIS_TEST_MS);
       break;
 
     case 'g':
@@ -853,22 +851,22 @@ void processHostCommand(String cmd) {
 
     case 'z':
     case 'Z':
-      softChassisMove(M1_TURN_LEFT, M2_TURN_LEFT, M3_TURN_LEFT, M4_TURN_LEFT, "turn left", CHASSIS_TEST_MS);
+      softChassisCommand(0, 0, TURN_TEST_SPEED, "turn left", CHASSIS_TEST_MS);
       break;
 
     case 'c':
     case 'C':
-      softChassisMove(-M1_TURN_LEFT, -M2_TURN_LEFT, -M3_TURN_LEFT, -M4_TURN_LEFT, "turn right", CHASSIS_TEST_MS);
+      softChassisCommand(0, 0, -TURN_TEST_SPEED, "turn right", CHASSIS_TEST_MS);
       break;
 
     case 'h':
     case 'H':
-      softChassisMove(M1_STRAFE_LEFT, M2_STRAFE_LEFT, M3_STRAFE_LEFT, M4_STRAFE_LEFT, "strafe left", CHASSIS_TEST_MS);
+      softChassisCommand(0, STRAFE_TEST_SPEED, 0, "strafe left", CHASSIS_TEST_MS);
       break;
 
     case 'l':
     case 'L':
-      softChassisMove(-M1_STRAFE_LEFT, -M2_STRAFE_LEFT, -M3_STRAFE_LEFT, -M4_STRAFE_LEFT, "strafe right", CHASSIS_TEST_MS);
+      softChassisCommand(0, -STRAFE_TEST_SPEED, 0, "strafe right", CHASSIS_TEST_MS);
       break;
 
     case 'f':
