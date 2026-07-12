@@ -30,12 +30,14 @@ static const int MAX_WHEEL_OUTPUT = 40;
 static const int CONTROL_RAMP_STEP = 6;
 static const unsigned long CONTROL_UPDATE_MS = 40;
 static const unsigned long DEFAULT_COMMAND_TIMEOUT_MS = 500;
+static const unsigned long MOTION_REFRESH_TIMEOUT_MS = 500;
 static const unsigned long MIN_COMMAND_TIMEOUT_MS = 100;
 static const unsigned long MAX_COMMAND_TIMEOUT_MS = 3000;
 static const unsigned long AT8236_BOOT_WAIT_MS = 1500;
 static const unsigned long AT8236_ACTIVE_TIMEOUT_MS = 1000;
 static const size_t MAX_PROTOCOL_LINE_LEN = 60;
 static const size_t MAX_MOTOR_FRAME_LEN = 80;
+static const size_t BLE_RX_QUEUE_LEN = 256;
 
 static const int M1_TRIM_PERCENT = 100;
 static const int M2_TRIM_PERCENT = 100;
@@ -78,9 +80,13 @@ struct LineBuffer {
 
 BLEServer *bleServer = NULL;
 BLECharacteristic *txCharacteristic = NULL;
-bool bleClientConnected = false;
-bool bleAdvertisingNeedsRestart = false;
+volatile bool bleClientConnected = false;
+volatile bool bleAdvertisingNeedsRestart = false;
+volatile bool bleDisconnectPending = false;
+volatile bool bleRxOverflowPending = false;
 bool readyNotified = false;
+ControlSource readyNotificationTarget = SOURCE_NONE;
+QueueHandle_t bleRxQueue = NULL;
 
 LineBuffer bleLineBuffer = {{0}, 0, false};
 LineBuffer usbLineBuffer = {{0}, 0, false};
@@ -91,10 +97,12 @@ ControlSource owner = SOURCE_NONE;
 
 unsigned long commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
 unsigned long ownerLastActivityMs = 0;
+unsigned long lastMotionCommandMs = 0;
 unsigned long lastControlUpdateMs = 0;
 unsigned long bootStartMs = 0;
 unsigned long lastValidMotorFrameMs = 0;
 bool at8236Ready = false;
+unsigned long lastEmergencySequence = 0;
 
 int targetM1 = 0;
 int targetM2 = 0;
@@ -187,6 +195,7 @@ void sendImmediateStopToDriver() {
 void releaseOwner() {
   owner = SOURCE_NONE;
   ownerLastActivityMs = 0;
+  lastMotionCommandMs = 0;
 }
 
 void enterState(SystemState nextState) {
@@ -227,10 +236,11 @@ void sendLine(ControlSource source, const String &line) {
   }
 }
 
-void broadcastReadyIfNeeded() {
+void sendReadyAfterHandshake(ControlSource source) {
   if (!readyNotified && at8236Ready && systemState == READY_STOP) {
-    sendToBle("r\n");
+    sendLine(source, "r\n");
     readyNotified = true;
+    readyNotificationTarget = SOURCE_NONE;
   }
 }
 
@@ -373,7 +383,7 @@ void handleMotionCommand(ControlSource source, const String &line) {
     sendImmediateStopToDriver();
     if (!isLatchedState()) {
       releaseOwner();
-      enterState(READY_STOP);
+      enterState(at8236Ready ? READY_STOP : BOOT_STOP);
     }
     sendLine(source, "!OK,stop\n");
     return;
@@ -390,6 +400,7 @@ void handleMotionCommand(ControlSource source, const String &line) {
 
   setTankTargets((int)left, (int)right);
   ownerLastActivityMs = millis();
+  lastMotionCommandMs = ownerLastActivityMs;
   enterState(MANUAL_ACTIVE);
   sendLine(source, "!OK,c\n");
 }
@@ -421,26 +432,30 @@ void handleTimeoutCommand(ControlSource source, const String &line) {
 
 void handleFeatureQuery(ControlSource source) {
   sendLine(source, "fCART_AT8236:\n");
+  readyNotificationTarget = source;
+  sendReadyAfterHandshake(source);
 }
 
 void handleEmergencyStop(ControlSource source, const String &line) {
-  if (source != SOURCE_USB) {
-    reportError(source, "!S usb_only");
-    return;
-  }
-
   if (!line.startsWith("!S,")) {
     handleProtocolError(source, "!S format");
     return;
   }
 
-  if (line.substring(3).length() == 0) {
+  long sequence = 0;
+  if (!parseLongStrict(line.substring(3), sequence) || sequence <= 0) {
     handleProtocolError(source, "!S format");
     return;
   }
 
+  if ((unsigned long)sequence <= lastEmergencySequence) {
+    reportError(source, "!S stale");
+    return;
+  }
+  lastEmergencySequence = (unsigned long)sequence;
+
   enterLatchedFault(EMERGENCY_STOP);
-  sendToUsb("!OK,!S\n");
+  sendLine(source, "!OK,!S\n");
 }
 
 void processCommand(ControlSource source, const String &line) {
@@ -513,8 +528,39 @@ void consumeIncomingByte(ControlSource source, LineBuffer &buffer, char c) {
   buffer.data[buffer.len] = '\0';
 }
 
+bool isNumericTelemetryPayload(const String &payload, int minimumFields) {
+  if (payload.length() == 0) return false;
+  int fields = 1;
+  bool digitInField = false;
+  for (int i = 0; i < payload.length(); ++i) {
+    char c = payload.charAt(i);
+    if (isDigit(c)) {
+      digitInField = true;
+    } else if (c == ',' || c == ':') {
+      if (!digitInField) return false;
+      fields++;
+      digitInField = false;
+    } else if (c == '-' || c == '+' || c == '.' || c == ' ') {
+      // AT8236 telemetry may contain signed or decimal values.
+    } else {
+      return false;
+    }
+  }
+  return digitInField && fields >= minimumFields;
+}
+
 bool isRecognizedMotorFrame(const String &frame) {
-  return frame.startsWith("$MSPD:") || frame.startsWith("$MTEP:") || frame.startsWith("$MAll:");
+  if (!frame.endsWith("#")) return false;
+
+  const char *prefix = NULL;
+  if (frame.startsWith("$MSPD:")) prefix = "$MSPD:";
+  else if (frame.startsWith("$MTEP:")) prefix = "$MTEP:";
+  else if (frame.startsWith("$MAll:")) prefix = "$MAll:";
+  if (prefix == NULL) return false;
+
+  int payloadStart = strlen(prefix);
+  String payload = frame.substring(payloadStart, frame.length() - 1);
+  return isNumericTelemetryPayload(payload, 4);
 }
 
 void updateReadyStateFromTelemetry() {
@@ -573,6 +619,7 @@ class OpenBotBleServerCallbacks : public BLEServerCallbacks {
     (void)server;
     bleClientConnected = true;
     readyNotified = false;
+    readyNotificationTarget = SOURCE_NONE;
   }
 
   void onDisconnect(BLEServer *server) override {
@@ -580,22 +627,26 @@ class OpenBotBleServerCallbacks : public BLEServerCallbacks {
     bleClientConnected = false;
     bleAdvertisingNeedsRestart = true;
     readyNotified = false;
-    if (owner == SOURCE_BLE && !isLatchedState()) {
-      stopAndRelease(COM_TIMEOUT);
-    }
+    readyNotificationTarget = SOURCE_NONE;
+    // The callback only records the event. Motor I/O and state mutation stay in loop().
+    bleDisconnectPending = true;
   }
 };
 
 class OpenBotBleRxCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *characteristic) override {
-    std::string value = characteristic->getValue();
+    auto value = characteristic->getValue();
     for (size_t i = 0; i < value.length(); ++i) {
-      consumeIncomingByte(SOURCE_BLE, bleLineBuffer, value[i]);
+      char c = value[i];
+      if (bleRxQueue == NULL || xQueueSend(bleRxQueue, &c, 0) != pdTRUE) {
+        bleRxOverflowPending = true;
+      }
     }
   }
 };
 
 void setupBle() {
+  bleRxQueue = xQueueCreate(BLE_RX_QUEUE_LEN, sizeof(char));
   BLEDevice::init(BLE_DEVICE_NAME);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new OpenBotBleServerCallbacks());
@@ -621,6 +672,29 @@ void setupBle() {
   BLEDevice::startAdvertising();
 }
 
+void serviceBleEvents() {
+  if (bleDisconnectPending) {
+    bleDisconnectPending = false;
+    if (owner == SOURCE_BLE && !isLatchedState()) {
+      stopAndRelease(COM_TIMEOUT);
+    }
+    bleLineBuffer = {{0}, 0, false};
+    if (bleRxQueue != NULL) xQueueReset(bleRxQueue);
+  }
+
+  if (bleRxOverflowPending) {
+    bleRxOverflowPending = false;
+    handleProtocolError(SOURCE_BLE, "rx queue overflow");
+    bleLineBuffer = {{0}, 0, false};
+    if (bleRxQueue != NULL) xQueueReset(bleRxQueue);
+  }
+
+  char c;
+  while (bleRxQueue != NULL && xQueueReceive(bleRxQueue, &c, 0) == pdTRUE) {
+    consumeIncomingByte(SOURCE_BLE, bleLineBuffer, c);
+  }
+}
+
 void pollUsbSerial() {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
@@ -636,6 +710,13 @@ void pollTimeouts() {
   }
 
   if (systemState == MANUAL_ACTIVE && owner != SOURCE_NONE && now - ownerLastActivityMs > commandTimeoutMs) {
+    stopAndRelease(COM_TIMEOUT);
+  }
+
+  // Heartbeats prove that the link is alive; repeated c commands prove that the
+  // control producer is alive. Either watchdog may stop a moving cart.
+  if (systemState == MANUAL_ACTIVE && owner != SOURCE_NONE &&
+      now - lastMotionCommandMs > MOTION_REFRESH_TIMEOUT_MS) {
     stopAndRelease(COM_TIMEOUT);
   }
 
@@ -692,6 +773,7 @@ void setup() {
 
 void loop() {
   pollUsbSerial();
+  serviceBleEvents();
   readMotorFrames();
   serviceBleAdvertising();
   pollTimeouts();
@@ -709,5 +791,7 @@ void loop() {
   }
 
   updateControlLoop();
-  broadcastReadyIfNeeded();
+  if (readyNotificationTarget != SOURCE_NONE) {
+    sendReadyAfterHandshake(readyNotificationTarget);
+  }
 }
