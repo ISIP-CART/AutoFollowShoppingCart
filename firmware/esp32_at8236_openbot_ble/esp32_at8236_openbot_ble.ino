@@ -84,7 +84,6 @@ volatile bool bleClientConnected = false;
 volatile bool bleAdvertisingNeedsRestart = false;
 volatile bool bleDisconnectPending = false;
 volatile bool bleRxOverflowPending = false;
-bool readyNotified = false;
 ControlSource readyNotificationTarget = SOURCE_NONE;
 QueueHandle_t bleRxQueue = NULL;
 
@@ -237,9 +236,8 @@ void sendLine(ControlSource source, const String &line) {
 }
 
 void sendReadyAfterHandshake(ControlSource source) {
-  if (!readyNotified && at8236Ready && systemState == READY_STOP) {
+  if (at8236Ready && systemState == READY_STOP) {
     sendLine(source, "r\n");
-    readyNotified = true;
     readyNotificationTarget = SOURCE_NONE;
   }
 }
@@ -618,7 +616,6 @@ class OpenBotBleServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *server) override {
     (void)server;
     bleClientConnected = true;
-    readyNotified = false;
     readyNotificationTarget = SOURCE_NONE;
   }
 
@@ -626,7 +623,6 @@ class OpenBotBleServerCallbacks : public BLEServerCallbacks {
     (void)server;
     bleClientConnected = false;
     bleAdvertisingNeedsRestart = true;
-    readyNotified = false;
     readyNotificationTarget = SOURCE_NONE;
     // The callback only records the event. Motor I/O and state mutation stay in loop().
     bleDisconnectPending = true;
