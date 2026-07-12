@@ -197,3 +197,28 @@ LEFT up
 任务边界应按证据链切分：上位机证明“最新方向按正确顺序成功写出”，下位机证明“最新方向被正确接收、映射、输出，并由四轮实际执行”。
 
 BLE 命令排序修复和 ESP32 USB 诊断已经进入最新代码，但真机问题尚未验收。四轮不同步不能用 Android generation 解决，旧命令也不能靠调电机 trim 解决。两边必须用同一次换向事件的时间戳和数值对齐后，再分别处理各自层级的问题。
+
+## 7. 上位机第二轮实施状态（OpenBot `e1c5238`）
+
+针对第 3.2 节仍缺少的真机证据，上位机已完成：
+
+- 现有“记录日志”开关同时控制 `CartControl` Logcat，默认关闭；
+- 触摸日志包含 elapsed realtime、事件、pointer ID、generation 和方向；
+- BLE 队列日志包含 enqueue、transition、dispatch、success/failure、retry、clear、
+  类型、generation、pending 数量和 payload；
+- 四个方向按钮改为控制区统一处理 MotionEvent，可识别单指从 A 滑到 B；
+- 第二个 pointer 可以抢占，旧 pointer 的迟到移动和释放不会覆盖当前方向；
+- 速度保持 `14/12/5` 和自动 `14/5`，未修改 ESP32 参数；
+- `robot` 单元测试 30/30、格式检查和 Debug APK 构建通过。
+
+Android 日志采集命令：
+
+```powershell
+adb logcat -c
+adb logcat -s CartControl:I
+```
+
+真机测试时同时在 ESP32 USB 发送 `!D,1`。下一步必须对齐同一次换向中的
+`touch -> queue_dispatch -> gatt_success -> motion_rx -> motion_target -> drive_output -> $MSPD`。
+如果 Android 与 ESP32 命令顺序一致，但四轮仍不能同步过零，则停止修改上位机队列，
+转入第 4.3-4.4 节的逐轮测试与下位机换向过零联锁。
