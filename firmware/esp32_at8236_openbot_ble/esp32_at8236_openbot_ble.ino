@@ -36,6 +36,7 @@ static const unsigned long MAX_COMMAND_TIMEOUT_MS = 3000;
 static const unsigned long AT8236_BOOT_WAIT_MS = 1500;
 static const unsigned long AT8236_ACTIVE_TIMEOUT_MS = 1000;
 static const unsigned long USB_DIAGNOSTIC_SAMPLE_MS = 100;
+static const unsigned long REVERSAL_NEUTRAL_MS = 1000;
 static const size_t MAX_PROTOCOL_LINE_LEN = 60;
 static const size_t MAX_MOTOR_FRAME_LEN = 80;
 static const size_t BLE_RX_QUEUE_LEN = 256;
@@ -68,6 +69,7 @@ enum SystemState {
   BOOT_STOP = 0,
   READY_STOP,
   MANUAL_ACTIVE,
+  REVERSAL_BLOCKED,
   COM_TIMEOUT,
   EMERGENCY_STOP,
   DRIVER_ERROR
@@ -112,6 +114,12 @@ int lastMotionCommandLeft = 0;
 int lastMotionCommandRight = 0;
 bool lastMotionCommandAccepted = false;
 unsigned long lastDiagnosticDriveLogMs = 0;
+bool hasLastNonzeroTarget = false;
+int lastNonzeroM1 = 0;
+int lastNonzeroM2 = 0;
+int lastNonzeroM3 = 0;
+int lastNonzeroM4 = 0;
+unsigned long reversalNeutralSinceMs = 0;
 
 int targetM1 = 0;
 int targetM2 = 0;
@@ -141,6 +149,8 @@ const char *stateName(SystemState state) {
       return "READY_STOP";
     case MANUAL_ACTIVE:
       return "MANUAL_ACTIVE";
+    case REVERSAL_BLOCKED:
+      return "REVERSAL_BLOCKED";
     case COM_TIMEOUT:
       return "COM_TIMEOUT";
     case EMERGENCY_STOP:
@@ -350,6 +360,14 @@ void mixChassisToWheels(int vx, int vy, int wz, int &m1, int &m2, int &m3, int &
   }
 }
 
+void calculateTankTargets(int left, int right, int &m1, int &m2, int &m3, int &m4) {
+  left = constrain(left, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
+  right = constrain(right, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
+  int vx = (left + right) / 2;
+  int wz = (right - left) / 2;
+  mixChassisToWheels(vx, 0, wz, m1, m2, m3, m4);
+}
+
 void setWheelTargets(int m1, int m2, int m3, int m4) {
   targetM1 = constrain(m1, -MAX_WHEEL_OUTPUT, MAX_WHEEL_OUTPUT);
   targetM2 = constrain(m2, -MAX_WHEEL_OUTPUT, MAX_WHEEL_OUTPUT);
@@ -358,14 +376,48 @@ void setWheelTargets(int m1, int m2, int m3, int m4) {
 }
 
 void setTankTargets(int left, int right) {
-  left = constrain(left, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
-  right = constrain(right, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
-
-  int vx = (left + right) / 2;
-  int wz = (right - left) / 2;
   int m1, m2, m3, m4;
-  mixChassisToWheels(vx, 0, wz, m1, m2, m3, m4);
+  calculateTankTargets(left, right, m1, m2, m3, m4);
   setWheelTargets(m1, m2, m3, m4);
+}
+
+bool signReverses(int previous, int next) {
+  return previous != 0 && next != 0 && ((previous > 0) != (next > 0));
+}
+
+bool requiresReversalBlock(int m1, int m2, int m3, int m4) {
+  if (!hasLastNonzeroTarget) return false;
+  return signReverses(lastNonzeroM1, m1) ||
+         signReverses(lastNonzeroM2, m2) ||
+         signReverses(lastNonzeroM3, m3) ||
+         signReverses(lastNonzeroM4, m4);
+}
+
+void rememberNonzeroTargets() {
+  lastNonzeroM1 = targetM1;
+  lastNonzeroM2 = targetM2;
+  lastNonzeroM3 = targetM3;
+  lastNonzeroM4 = targetM4;
+  hasLastNonzeroTarget = true;
+  reversalNeutralSinceMs = 0;
+}
+
+void beginReversalBlock() {
+  sendImmediateStopToDriver();
+  releaseOwner();
+  reversalNeutralSinceMs = 0;
+  enterState(REVERSAL_BLOCKED);
+  usbDiagnostic(
+    "reversal_block",
+    "last_target=" + String(lastNonzeroM1) + "," + String(lastNonzeroM2) + "," +
+      String(lastNonzeroM3) + "," + String(lastNonzeroM4));
+}
+
+void startReversalNeutralWindow() {
+  if (systemState == REVERSAL_BLOCKED && reversalNeutralSinceMs == 0) {
+    reversalNeutralSinceMs = millis();
+    usbDiagnostic("reversal_neutral", "started=1");
+  }
 }
 
 bool canAcceptMotion(ControlSource source, int left, int right) {
@@ -373,6 +425,9 @@ bool canAcceptMotion(ControlSource source, int left, int right) {
     return false;
   }
   if (!at8236Ready || systemState == BOOT_STOP) {
+    return false;
+  }
+  if (systemState == REVERSAL_BLOCKED) {
     return false;
   }
   if (left == 0 && right == 0) {
@@ -430,6 +485,13 @@ void printStatusToUsb() {
   line += lastMotionCommandAccepted ? "1" : "0";
   line += ",last_motion_age_ms=";
   line += lastMotionCommandReceivedMs == 0 ? String(-1) : String((long)(millis() - lastMotionCommandReceivedMs));
+  line += ",reversal_blocked=";
+  line += systemState == REVERSAL_BLOCKED ? "1" : "0";
+  line += ",reversal_neutral_age_ms=";
+  line += reversalNeutralSinceMs == 0 ? String(-1) : String((long)(millis() - reversalNeutralSinceMs));
+  line += ",last_nonzero_target=";
+  line += String(lastNonzeroM1) + "," + String(lastNonzeroM2) + "," +
+          String(lastNonzeroM3) + "," + String(lastNonzeroM4);
   line += "\n";
   sendToUsb(line);
 }
@@ -473,9 +535,20 @@ void handleMotionCommand(ControlSource source, const String &line) {
     sendImmediateStopToDriver();
     if (!isLatchedState()) {
       releaseOwner();
-      enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+      if (systemState == REVERSAL_BLOCKED) {
+        startReversalNeutralWindow();
+      } else {
+        enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+      }
     }
     sendLine(source, "!OK,stop\n");
+    return;
+  }
+
+  if (systemState == REVERSAL_BLOCKED) {
+    reversalNeutralSinceMs = 0;
+    usbDiagnostic("reversal_reject", "reason=neutral_required");
+    reportError(source, "reversal/neutral");
     return;
   }
 
@@ -488,7 +561,16 @@ void handleMotionCommand(ControlSource source, const String &line) {
     owner = source;
   }
 
-  setTankTargets((int)left, (int)right);
+  int nextM1, nextM2, nextM3, nextM4;
+  calculateTankTargets((int)left, (int)right, nextM1, nextM2, nextM3, nextM4);
+  if (requiresReversalBlock(nextM1, nextM2, nextM3, nextM4)) {
+    beginReversalBlock();
+    reportError(source, "reversal/neutral");
+    return;
+  }
+
+  setWheelTargets(nextM1, nextM2, nextM3, nextM4);
+  rememberNonzeroTargets();
   recordMotionTargets();
   ownerLastActivityMs = millis();
   lastMotionCommandMs = ownerLastActivityMs;
@@ -515,7 +597,8 @@ void handleTimeoutCommand(ControlSource source, const String &line) {
 
   commandTimeoutMs = (unsigned long)timeoutMs;
   refreshActivity(source);
-  if (!isLatchedState() && at8236Ready && owner == SOURCE_NONE && systemState != MANUAL_ACTIVE) {
+  if (!isLatchedState() && at8236Ready && owner == SOURCE_NONE &&
+      systemState != MANUAL_ACTIVE && systemState != REVERSAL_BLOCKED) {
     enterState(READY_STOP);
   }
   sendLine(source, "!OK,h\n");
@@ -823,6 +906,18 @@ void pollUsbSerial() {
 void pollTimeouts() {
   unsigned long now = millis();
 
+  if (systemState == REVERSAL_BLOCKED && reversalNeutralSinceMs != 0 &&
+      now - reversalNeutralSinceMs >= REVERSAL_NEUTRAL_MS) {
+    hasLastNonzeroTarget = false;
+    lastNonzeroM1 = 0;
+    lastNonzeroM2 = 0;
+    lastNonzeroM3 = 0;
+    lastNonzeroM4 = 0;
+    reversalNeutralSinceMs = 0;
+    enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+    usbDiagnostic("reversal_rearmed", "neutral_ms=" + String(REVERSAL_NEUTRAL_MS));
+  }
+
   if (!at8236Ready && now - bootStartMs > AT8236_BOOT_WAIT_MS && lastValidMotorFrameMs == 0) {
     enterState(BOOT_STOP);
   }
@@ -840,7 +935,7 @@ void pollTimeouts() {
     stopAndRelease(COM_TIMEOUT);
   }
 
-  if (systemState == MANUAL_ACTIVE &&
+  if ((systemState == MANUAL_ACTIVE || systemState == REVERSAL_BLOCKED) &&
       lastValidMotorFrameMs != 0 &&
       now - lastValidMotorFrameMs > AT8236_ACTIVE_TIMEOUT_MS) {
     usbDiagnostic("driver_timeout", "age_ms=" + String(now - lastValidMotorFrameMs));
@@ -871,7 +966,8 @@ void serviceBleAdvertising() {
     delay(50);
     bleServer->startAdvertising();
     bleAdvertisingNeedsRestart = false;
-    if (!isLatchedState() && at8236Ready && owner == SOURCE_NONE && systemState != BOOT_STOP) {
+    if (!isLatchedState() && at8236Ready && owner == SOURCE_NONE &&
+        systemState != BOOT_STOP && systemState != REVERSAL_BLOCKED) {
       enterState(READY_STOP);
     }
   }
@@ -907,7 +1003,8 @@ void loop() {
       at8236Ready &&
       !isLatchedState() &&
       owner == SOURCE_NONE &&
-      systemState != COM_TIMEOUT) {
+      systemState != COM_TIMEOUT &&
+      systemState != REVERSAL_BLOCKED) {
     enterState(READY_STOP);
   }
 

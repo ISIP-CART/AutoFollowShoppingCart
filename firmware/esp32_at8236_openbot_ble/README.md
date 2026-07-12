@@ -102,6 +102,16 @@ USB 输出以 `!D,ms=...` 开头的诊断事件；正常 BLE TX Notify 不会增
 检查 BLE 链路；ESP32 已记录 `motion_target` 但 `$spd` 或车轮不符合预期时，再检查
 AT8236 状态、方向配置和接线。完成测试后发送 `!D,0`，避免 USB 日志影响实时控制。
 
+## 安全换向保护
+
+固件会记住最近一次非零四轮目标。新的非零目标只要要求任一轮改变正负号，就会立即向 AT8236 下发四轮零速并进入 `REVERSAL_BLOCKED`；反向目标不会缓存，也不会在后台自动重放。
+
+解除步骤：先松开方向键，使上位机发送 `c0,0`；随后持续零命令等待 `1000 ms`；任何新的非零 `c` 都会保持四轮零速并重新开始等待。等待完成后必须重新按下所需方向，才会从零速软启动。同方向的连续更新不会触发此保护。
+
+`!Q`（USB）会输出 `reversal_blocked`、`reversal_neutral_age_ms` 与 `last_nonzero_target`；开启 `!D,1` 后，USB 日志还会记录 `reversal_block`、`reversal_neutral`、`reversal_reject` 和 `reversal_rearmed`。BLE 断连、运动保鲜超时、AT8236 遥测中断和锁存急停仍优先按原有规则停车。
+
+本版本尚未把 `$MSPD` 字段假定为四轮实际速度。收到单轮标定日志、确认字段顺序、符号、单位与刷新周期前，不会启用自动过零换向。
+
 ## 控制权规则
 
 - 控制源只有 `OWNER_NONE / OWNER_BLE / OWNER_USB`
@@ -121,6 +131,9 @@ AT8236 状态、方向配置和接线。完成测试后发送 `!D,0`，避免 US
   - 驱动已就绪，输出保持零
 - `MANUAL_ACTIVE`
   - 当前由 BLE 或 USB 持有控制权并输出低速运动
+- `REVERSAL_BLOCKED`
+  - 任一轮被要求直接反转时进入，保持四轮零输出
+  - 仅在收到 `c0,0` 后连续等待 `1000 ms` 才回到可接受新方向的停止状态
 - `COM_TIMEOUT`
   - 控制命令超时或 BLE 断连后进入，输出保持零
 - `EMERGENCY_STOP`
