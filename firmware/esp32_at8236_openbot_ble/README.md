@@ -134,6 +134,21 @@ Android 启用 Notify 后应发送 `f\n`。固件先返回功能信息，并在 
 5. 等待 BLE 广播 `OpenBot: CART_AT8236`。
 6. 连接后用 `f\n`、`h500\n`、`c0,0\n` 做无电机安全确认。
 
+## 烧录失败处理
+
+如果编译已经成功，但上传阶段在 `Writing ... esp32_at8236_openbot_ble.ino.bin` 中途失败，并出现
+`esptool ... IndexError: index out of range`，通常不是固件源码错误，而是高速串口写入过程中通信被打断。
+
+优先按下面顺序处理：
+
+1. 在 Arduino IDE 中把 `Tools -> Upload Speed` 从 `921600` 改为 `460800`，仍失败则改为 `115200`。
+2. 关闭串口监视器、BLE 调试工具和其他占用 `COM3` 的程序后重新上传。
+3. 使用更短、更稳定的数据线，ESP32 直接接电脑 USB，不要经过不稳定的 USB hub。
+4. 若仍失败，选择 `Tools -> Erase All Flash Before Sketch Upload -> Enabled` 后重新上传一次；成功后可改回 `Disabled`。
+5. 上传期间保持 ESP32 与 AT8236 共地，但若底盘供电干扰 USB，可先断开电机电源，只给 ESP32 供电完成烧录。
+
+本固件编译体积约占 ESP32 默认 app 分区的 84%，仍在 `ESP32 Dev Module` 默认分区上限内；上述报错更符合上传链路不稳定，而不是程序过大。
+
 ## 建议测试顺序
 
 1. 无电机测试：确认广播名、UUID、`f` 回包、分包与多行解析、异常输入保持停车。
