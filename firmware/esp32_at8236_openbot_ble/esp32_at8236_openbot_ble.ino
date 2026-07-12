@@ -35,6 +35,7 @@ static const unsigned long MIN_COMMAND_TIMEOUT_MS = 100;
 static const unsigned long MAX_COMMAND_TIMEOUT_MS = 3000;
 static const unsigned long AT8236_BOOT_WAIT_MS = 1500;
 static const unsigned long AT8236_ACTIVE_TIMEOUT_MS = 1000;
+static const unsigned long USB_DIAGNOSTIC_SAMPLE_MS = 100;
 static const size_t MAX_PROTOCOL_LINE_LEN = 60;
 static const size_t MAX_MOTOR_FRAME_LEN = 80;
 static const size_t BLE_RX_QUEUE_LEN = 256;
@@ -102,6 +103,15 @@ unsigned long bootStartMs = 0;
 unsigned long lastValidMotorFrameMs = 0;
 bool at8236Ready = false;
 unsigned long lastEmergencySequence = 0;
+bool usbDiagnosticsEnabled = false;
+unsigned long motionCommandCount = 0;
+unsigned long lastMotionCommandSequence = 0;
+unsigned long lastMotionCommandReceivedMs = 0;
+ControlSource lastMotionCommandSource = SOURCE_NONE;
+int lastMotionCommandLeft = 0;
+int lastMotionCommandRight = 0;
+bool lastMotionCommandAccepted = false;
+unsigned long lastDiagnosticDriveLogMs = 0;
 
 int targetM1 = 0;
 int targetM2 = 0;
@@ -146,6 +156,51 @@ bool isLatchedState() {
   return systemState == EMERGENCY_STOP || systemState == DRIVER_ERROR;
 }
 
+void usbDiagnostic(const String &event, const String &details) {
+  if (!usbDiagnosticsEnabled) return;
+
+  String line = "!D,ms=";
+  line += String(millis());
+  line += ",event=";
+  line += event;
+  if (details.length() > 0) {
+    line += ",";
+    line += details;
+  }
+  line += "\n";
+  Serial.print(line);
+}
+
+void usbDiagnostic(const String &event) {
+  usbDiagnostic(event, "");
+}
+
+void recordMotionCommand(ControlSource source, int left, int right) {
+  motionCommandCount++;
+  lastMotionCommandSequence = motionCommandCount;
+  lastMotionCommandReceivedMs = millis();
+  lastMotionCommandSource = source;
+  lastMotionCommandLeft = left;
+  lastMotionCommandRight = right;
+  lastMotionCommandAccepted = false;
+
+  usbDiagnostic(
+    "motion_rx",
+    "seq=" + String(lastMotionCommandSequence) +
+      ",source=" + sourceName(source) +
+      ",left=" + String(left) +
+      ",right=" + String(right));
+}
+
+void recordMotionTargets() {
+  lastMotionCommandAccepted = true;
+  usbDiagnostic(
+    "motion_target",
+    "seq=" + String(lastMotionCommandSequence) +
+      ",target=" + String(targetM1) + "," + String(targetM2) + "," +
+      String(targetM3) + "," + String(targetM4));
+}
+
 void sendMotorCommand(const char *cmd) {
   MotorSerial.print(cmd);
 }
@@ -166,11 +221,24 @@ void sendSpeed(int m1, int m2, int m3, int m4) {
 }
 
 void sendDriveSpeed(int m1, int m2, int m3, int m4) {
-  sendSpeed(
-    applyTrim(m1, M1_TRIM_PERCENT),
-    applyTrim(m2, M2_TRIM_PERCENT),
-    applyTrim(m3, M3_TRIM_PERCENT),
-    applyTrim(m4, M4_TRIM_PERCENT));
+  int outputM1 = applyTrim(m1, M1_TRIM_PERCENT);
+  int outputM2 = applyTrim(m2, M2_TRIM_PERCENT);
+  int outputM3 = applyTrim(m3, M3_TRIM_PERCENT);
+  int outputM4 = applyTrim(m4, M4_TRIM_PERCENT);
+  sendSpeed(outputM1, outputM2, outputM3, outputM4);
+
+  unsigned long now = millis();
+  if (usbDiagnosticsEnabled &&
+      (lastDiagnosticDriveLogMs == 0 || now - lastDiagnosticDriveLogMs >= USB_DIAGNOSTIC_SAMPLE_MS)) {
+    lastDiagnosticDriveLogMs = now;
+    usbDiagnostic(
+      "drive_output",
+      "seq=" + String(lastMotionCommandSequence) +
+        ",current=" + String(currentM1) + "," + String(currentM2) + "," +
+        String(currentM3) + "," + String(currentM4) +
+        ",spd=" + String(outputM1) + "," + String(outputM2) + "," +
+        String(outputM3) + "," + String(outputM4));
+  }
 }
 
 void zeroTargetsAndCurrents() {
@@ -189,6 +257,7 @@ void sendImmediateStopToDriver() {
   sendMotorCommand("$spd:0,0,0,0#");
   delay(20);
   sendMotorCommand("$pwm:0,0,0,0#");
+  usbDiagnostic("immediate_stop", "seq=" + String(lastMotionCommandSequence));
 }
 
 void releaseOwner() {
@@ -198,6 +267,11 @@ void releaseOwner() {
 }
 
 void enterState(SystemState nextState) {
+  if (systemState != nextState) {
+    usbDiagnostic(
+      "state",
+      "from=" + String(stateName(systemState)) + ",to=" + String(stateName(nextState)));
+  }
   systemState = nextState;
 }
 
@@ -314,6 +388,7 @@ void refreshActivity(ControlSource source) {
 }
 
 void reportError(ControlSource source, const String &reason) {
+  usbDiagnostic("error", "source=" + String(sourceName(source)) + ",reason=" + reason);
   sendLine(source, "!ERR," + reason + "\n");
 }
 
@@ -341,6 +416,20 @@ void printStatusToUsb() {
   line += String(currentM1) + "," + String(currentM2) + "," + String(currentM3) + "," + String(currentM4);
   line += ",motor_frame_age_ms=";
   line += lastValidMotorFrameMs == 0 ? String(-1) : String((long)(millis() - lastValidMotorFrameMs));
+  line += ",diag=";
+  line += usbDiagnosticsEnabled ? "1" : "0";
+  line += ",motion_count=";
+  line += String(motionCommandCount);
+  line += ",last_motion_seq=";
+  line += String(lastMotionCommandSequence);
+  line += ",last_motion_source=";
+  line += sourceName(lastMotionCommandSource);
+  line += ",last_motion=";
+  line += String(lastMotionCommandLeft) + "," + String(lastMotionCommandRight);
+  line += ",last_motion_accepted=";
+  line += lastMotionCommandAccepted ? "1" : "0";
+  line += ",last_motion_age_ms=";
+  line += lastMotionCommandReceivedMs == 0 ? String(-1) : String((long)(millis() - lastMotionCommandReceivedMs));
   line += "\n";
   sendToUsb(line);
 }
@@ -377,7 +466,10 @@ void handleMotionCommand(ControlSource source, const String &line) {
     return;
   }
 
+  recordMotionCommand(source, (int)left, (int)right);
+
   if (left == 0 && right == 0) {
+    lastMotionCommandAccepted = true;
     sendImmediateStopToDriver();
     if (!isLatchedState()) {
       releaseOwner();
@@ -397,6 +489,7 @@ void handleMotionCommand(ControlSource source, const String &line) {
   }
 
   setTankTargets((int)left, (int)right);
+  recordMotionTargets();
   ownerLastActivityMs = millis();
   lastMotionCommandMs = ownerLastActivityMs;
   enterState(MANUAL_ACTIVE);
@@ -456,6 +549,29 @@ void handleEmergencyStop(ControlSource source, const String &line) {
   sendLine(source, "!OK,!S\n");
 }
 
+void handleDiagnosticsCommand(ControlSource source, const String &line) {
+  if (source != SOURCE_USB) {
+    reportError(source, "!D usb_only");
+    return;
+  }
+
+  if (line == "!D,0") {
+    usbDiagnosticsEnabled = false;
+    sendToUsb("!OK,!D,0\n");
+    return;
+  }
+
+  if (line == "!D,1") {
+    usbDiagnosticsEnabled = true;
+    lastDiagnosticDriveLogMs = 0;
+    sendToUsb("!OK,!D,1\n");
+    usbDiagnostic("diagnostics", "enabled=1");
+    return;
+  }
+
+  handleProtocolError(source, "!D format");
+}
+
 void processCommand(ControlSource source, const String &line) {
   if (line.length() == 0) {
     return;
@@ -478,6 +594,11 @@ void processCommand(ControlSource source, const String &line) {
 
   if (line.startsWith("!S")) {
     handleEmergencyStop(source, line);
+    return;
+  }
+
+  if (line.startsWith("!D")) {
+    handleDiagnosticsCommand(source, line);
     return;
   }
 
@@ -671,6 +792,7 @@ void setupBle() {
 void serviceBleEvents() {
   if (bleDisconnectPending) {
     bleDisconnectPending = false;
+    usbDiagnostic("ble_disconnect");
     if (owner == SOURCE_BLE && !isLatchedState()) {
       stopAndRelease(COM_TIMEOUT);
     }
@@ -706,6 +828,7 @@ void pollTimeouts() {
   }
 
   if (systemState == MANUAL_ACTIVE && owner != SOURCE_NONE && now - ownerLastActivityMs > commandTimeoutMs) {
+    usbDiagnostic("communication_timeout", "age_ms=" + String(now - ownerLastActivityMs));
     stopAndRelease(COM_TIMEOUT);
   }
 
@@ -713,12 +836,14 @@ void pollTimeouts() {
   // control producer is alive. Either watchdog may stop a moving cart.
   if (systemState == MANUAL_ACTIVE && owner != SOURCE_NONE &&
       now - lastMotionCommandMs > MOTION_REFRESH_TIMEOUT_MS) {
+    usbDiagnostic("motion_timeout", "age_ms=" + String(now - lastMotionCommandMs));
     stopAndRelease(COM_TIMEOUT);
   }
 
   if (systemState == MANUAL_ACTIVE &&
       lastValidMotorFrameMs != 0 &&
       now - lastValidMotorFrameMs > AT8236_ACTIVE_TIMEOUT_MS) {
+    usbDiagnostic("driver_timeout", "age_ms=" + String(now - lastValidMotorFrameMs));
     enterLatchedFault(DRIVER_ERROR);
   }
 }
