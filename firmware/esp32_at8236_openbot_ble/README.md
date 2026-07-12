@@ -43,8 +43,9 @@ AT8236 初始化参数：
 - RX 属性：`Write + Write Without Response`
 - TX 属性：`Notify + BLE2902`
 
-Android 启用 Notify 后应发送 `f\n`。固件先返回功能信息，并在 AT8236
-遥测就绪后通过 BLE TX 发送 `r\n`，避免连接初期的就绪通知丢失。
+Android 启用 Notify 后应发送 `f\n`。固件每次都返回功能信息，并在 AT8236
+遥测就绪时同时发送 `r\n`；若尚未就绪，则在就绪后补发。这样 Android 重试
+`f\n` 时可以恢复丢失的就绪通知。
 
 ## 正式协议
 
