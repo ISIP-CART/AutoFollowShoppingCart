@@ -29,22 +29,66 @@ static const int PROTOCOL_INPUT_LIMIT = 255;
 static const int MAX_WHEEL_OUTPUT = 40;
 static const int CONTROL_RAMP_STEP = 6;
 static const unsigned long CONTROL_UPDATE_MS = 40;
-static const unsigned long DEFAULT_COMMAND_TIMEOUT_MS = 500;
+// Default command freshness interval.  `h<timeout_ms>` may explicitly widen
+// this interval up to MAX_COMMAND_TIMEOUT_MS for a manual control session.
+// It is deliberately still bounded; BLE disconnect, AT8236 timeout and !S
+// remain independent stop paths.
 static const unsigned long MOTION_REFRESH_TIMEOUT_MS = 500;
+static const unsigned long DEFAULT_COMMAND_TIMEOUT_MS = MOTION_REFRESH_TIMEOUT_MS;
 static const unsigned long MIN_COMMAND_TIMEOUT_MS = 100;
 static const unsigned long MAX_COMMAND_TIMEOUT_MS = 3000;
 static const unsigned long AT8236_BOOT_WAIT_MS = 1500;
 static const unsigned long AT8236_ACTIVE_TIMEOUT_MS = 1000;
 static const unsigned long USB_DIAGNOSTIC_SAMPLE_MS = 100;
 static const unsigned long REVERSAL_NEUTRAL_MS = 1000;
+static const unsigned long STRAIGHT_STARTUP_ASSIST_MS = 1600;
+static const unsigned long STRAIGHT_BREAKAWAY_KICK_MS = 350;
+static const unsigned long TURN_STARTUP_ASSIST_MS = 1600;
+static const unsigned long TURN_BREAKAWAY_KICK_MS = 400;
+static const unsigned long STARTUP_ASSIST_MSPD_MAX_AGE_MS = 250;
+static const float STARTUP_ASSIST_MSPD_ZERO_LIMIT = 80.0f;
+static const float STRAIGHT_STALL_MSPD_LIMIT = 80.0f;
 static const size_t MAX_PROTOCOL_LINE_LEN = 60;
 static const size_t MAX_MOTOR_FRAME_LEN = 80;
 static const size_t BLE_RX_QUEUE_LEN = 256;
 
-static const int M1_TRIM_PERCENT = 100;
-static const int M2_TRIM_PERCENT = 100;
-static const int M3_TRIM_PERCENT = 100;
-static const int M4_TRIM_PERCENT = 100;
+// 2026-07-13 landed straight-line tests:
+// - raised-wheel trim (M2=130%, M4=100%) made the cart visibly turn left;
+// - aggressive landed compensation (M1=120%, M2=90%, M3=130%, M4=80%) made it
+//   turn right, with left-side MSPD much higher than right-side MSPD.
+// This is the next midpoint trim: the previous M1=110/M2=105/M3=115/M4=95
+// still produced a slight right drift, so move one small step toward balanced
+// landed straight-line output.
+static const int M1_TRIM_PERCENT = 105;
+static const int M2_TRIM_PERCENT = 110;
+static const int M3_TRIM_PERCENT = 110;
+// Landed BLE logs show M4 (right front) is the repeatable weak wheel:
+// it can remain near zero on reverse while the other three are moving.
+// Raise it to the same steady-state trim as M2; turn output remains bounded
+// by its existing symmetric floor/kick logic.
+static const int M4_TRIM_PERCENT = 110;
+// The landed cart does not reliably overcome static friction at c14,14:
+// applying the former per-wheel floors still produced only 14/15 output.
+// Use a short per-wheel breakaway pulse, then a lower per-wheel hold so the
+// cart starts straight without carrying the turn-specific high kick over.
+// The later BLE trials show the right-side asymmetric pulse over-corrects:
+// it makes the cart drift one way forward and the opposite way in reverse.
+// Keep the proven M4 steady-state trim, but make the transient launch pulse
+// symmetric so a direction reversal cannot turn the same bias into its mirror.
+static const int M1_STRAIGHT_BREAKAWAY_KICK_OUTPUT = 24;
+static const int M2_STRAIGHT_BREAKAWAY_KICK_OUTPUT = 24;
+static const int M3_STRAIGHT_BREAKAWAY_KICK_OUTPUT = 24;
+static const int M4_STRAIGHT_BREAKAWAY_KICK_OUTPUT = 24;
+static const int M1_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT = 20;
+static const int M2_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT = 20;
+static const int M3_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT = 20;
+static const int M4_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT = 20;
+// A wheel which has not started after the common breakaway phase may receive
+// this bounded, individual retry.  It is deliberately below the turn kick.
+static const int STRAIGHT_STALL_BOOST_OUTPUT = 30;
+static const int TURN_HOLD_MIN_OUTPUT = 24;
+static const int TURN_STARTUP_ASSIST_MIN_OUTPUT = 32;
+static const int TURN_BREAKAWAY_KICK_OUTPUT = 40;
 
 // Wheel placement:
 //   M3 = left front, M4 = right front
@@ -75,6 +119,12 @@ enum SystemState {
   DRIVER_ERROR
 };
 
+enum StartupAssistMode {
+  STARTUP_ASSIST_NONE = 0,
+  STARTUP_ASSIST_STRAIGHT,
+  STARTUP_ASSIST_TURN
+};
+
 struct LineBuffer {
   char data[MAX_PROTOCOL_LINE_LEN + 1];
   size_t len;
@@ -101,8 +151,16 @@ unsigned long commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
 unsigned long ownerLastActivityMs = 0;
 unsigned long lastMotionCommandMs = 0;
 unsigned long lastControlUpdateMs = 0;
+unsigned long startupAssistUntilMs = 0;
+unsigned long startupAssistStartMs = 0;
+StartupAssistMode startupAssistMode = STARTUP_ASSIST_NONE;
 unsigned long bootStartMs = 0;
 unsigned long lastValidMotorFrameMs = 0;
+unsigned long lastMspdFrameMs = 0;
+float latestMspdM1 = 0.0f;
+float latestMspdM2 = 0.0f;
+float latestMspdM3 = 0.0f;
+float latestMspdM4 = 0.0f;
 bool at8236Ready = false;
 unsigned long lastEmergencySequence = 0;
 bool usbDiagnosticsEnabled = false;
@@ -220,6 +278,107 @@ int applyTrim(int speed, int trimPercent) {
   return constrain(trimmed, -MAX_WHEEL_OUTPUT, MAX_WHEEL_OUTPUT);
 }
 
+bool startupAssistActive(unsigned long now) {
+  return startupAssistUntilMs != 0 && (long)(startupAssistUntilMs - now) > 0;
+}
+
+const char *startupAssistModeName(StartupAssistMode mode) {
+  switch (mode) {
+    case STARTUP_ASSIST_STRAIGHT:
+      return "straight";
+    case STARTUP_ASSIST_TURN:
+      return "turn";
+    case STARTUP_ASSIST_NONE:
+    default:
+      return "none";
+  }
+}
+
+float absFloat(float value) {
+  return value < 0.0f ? -value : value;
+}
+
+bool mspdFreshForStartup(unsigned long now) {
+  return lastMspdFrameMs != 0 && now - lastMspdFrameMs <= STARTUP_ASSIST_MSPD_MAX_AGE_MS;
+}
+
+bool mspdStationaryForStartup(unsigned long now) {
+  if (!mspdFreshForStartup(now)) {
+    return false;
+  }
+
+  return absFloat(latestMspdM1) <= STARTUP_ASSIST_MSPD_ZERO_LIMIT &&
+         absFloat(latestMspdM2) <= STARTUP_ASSIST_MSPD_ZERO_LIMIT &&
+         absFloat(latestMspdM3) <= STARTUP_ASSIST_MSPD_ZERO_LIMIT &&
+         absFloat(latestMspdM4) <= STARTUP_ASSIST_MSPD_ZERO_LIMIT;
+}
+
+int applyStartupAssist(int output, int minimumAbs) {
+  if (output == 0) {
+    return 0;
+  }
+
+  int magnitude = abs(output);
+  if (magnitude >= minimumAbs) {
+    return output;
+  }
+
+  return output > 0 ? minimumAbs : -minimumAbs;
+}
+
+bool isPureTurnTarget(int m1, int m2, int m3, int m4) {
+  return m1 != 0 && m1 == m2 && m3 == m4 && m1 == -m3;
+}
+
+bool turnBreakawayKickActive(unsigned long now) {
+  return startupAssistMode == STARTUP_ASSIST_TURN &&
+         startupAssistStartMs != 0 &&
+         now - startupAssistStartMs < TURN_BREAKAWAY_KICK_MS;
+}
+
+bool straightBreakawayKickActive(unsigned long now) {
+  return startupAssistMode == STARTUP_ASSIST_STRAIGHT &&
+         startupAssistStartMs != 0 &&
+         now - startupAssistStartMs < STRAIGHT_BREAKAWAY_KICK_MS;
+}
+
+bool softwareWheelsAreZero() {
+  return targetM1 == 0 && targetM2 == 0 && targetM3 == 0 && targetM4 == 0 &&
+         currentM1 == 0 && currentM2 == 0 && currentM3 == 0 && currentM4 == 0;
+}
+
+bool stopCommandIsRedundant() {
+  return owner == SOURCE_NONE &&
+         systemState != MANUAL_ACTIVE &&
+         systemState != REVERSAL_BLOCKED &&
+         softwareWheelsAreZero() &&
+         !startupAssistActive(millis());
+}
+
+StartupAssistMode startupAssistModeForCommand(int left, int right) {
+  if (left == right && abs(left) >= 12) {
+    return STARTUP_ASSIST_STRAIGHT;
+  }
+
+  if (left == -right && abs(left) >= 5) {
+    return STARTUP_ASSIST_TURN;
+  }
+
+  return STARTUP_ASSIST_NONE;
+}
+
+unsigned long startupAssistDurationMs(StartupAssistMode mode) {
+  switch (mode) {
+    case STARTUP_ASSIST_STRAIGHT:
+      return STRAIGHT_STARTUP_ASSIST_MS;
+    case STARTUP_ASSIST_TURN:
+      return TURN_STARTUP_ASSIST_MS;
+    case STARTUP_ASSIST_NONE:
+    default:
+      return 0;
+  }
+}
+
 void sendSpeed(int m1, int m2, int m3, int m4) {
   char cmd[40];
   snprintf(cmd, sizeof(cmd), "$spd:%d,%d,%d,%d#",
@@ -231,13 +390,62 @@ void sendSpeed(int m1, int m2, int m3, int m4) {
 }
 
 void sendDriveSpeed(int m1, int m2, int m3, int m4) {
+  unsigned long now = millis();
   int outputM1 = applyTrim(m1, M1_TRIM_PERCENT);
   int outputM2 = applyTrim(m2, M2_TRIM_PERCENT);
   int outputM3 = applyTrim(m3, M3_TRIM_PERCENT);
   int outputM4 = applyTrim(m4, M4_TRIM_PERCENT);
+  bool assistActive = startupAssistActive(now);
+  bool turnFloorActive = isPureTurnTarget(m1, m2, m3, m4);
+  bool turnKickActive = assistActive && turnFloorActive && turnBreakawayKickActive(now);
+  bool straightKickActive = assistActive && straightBreakawayKickActive(now);
+  bool straightStallCheckActive =
+    assistActive &&
+    startupAssistMode == STARTUP_ASSIST_STRAIGHT &&
+    !straightKickActive &&
+    mspdFreshForStartup(now);
+  bool straightStallM1 = straightStallCheckActive && absFloat(latestMspdM1) < STRAIGHT_STALL_MSPD_LIMIT;
+  bool straightStallM2 = straightStallCheckActive && absFloat(latestMspdM2) < STRAIGHT_STALL_MSPD_LIMIT;
+  bool straightStallM3 = straightStallCheckActive && absFloat(latestMspdM3) < STRAIGHT_STALL_MSPD_LIMIT;
+  bool straightStallM4 = straightStallCheckActive && absFloat(latestMspdM4) < STRAIGHT_STALL_MSPD_LIMIT;
+  if (turnFloorActive) {
+    outputM1 = applyStartupAssist(outputM1, TURN_HOLD_MIN_OUTPUT);
+    outputM2 = applyStartupAssist(outputM2, TURN_HOLD_MIN_OUTPUT);
+    outputM3 = applyStartupAssist(outputM3, TURN_HOLD_MIN_OUTPUT);
+    outputM4 = applyStartupAssist(outputM4, TURN_HOLD_MIN_OUTPUT);
+  }
+
+  if (straightKickActive) {
+    outputM1 = applyStartupAssist(outputM1, M1_STRAIGHT_BREAKAWAY_KICK_OUTPUT);
+    outputM2 = applyStartupAssist(outputM2, M2_STRAIGHT_BREAKAWAY_KICK_OUTPUT);
+    outputM3 = applyStartupAssist(outputM3, M3_STRAIGHT_BREAKAWAY_KICK_OUTPUT);
+    outputM4 = applyStartupAssist(outputM4, M4_STRAIGHT_BREAKAWAY_KICK_OUTPUT);
+  } else if (assistActive && startupAssistMode == STARTUP_ASSIST_STRAIGHT) {
+    outputM1 = applyStartupAssist(outputM1, M1_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM2 = applyStartupAssist(outputM2, M2_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM3 = applyStartupAssist(outputM3, M3_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM4 = applyStartupAssist(outputM4, M4_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
+  } else if (turnKickActive) {
+    outputM1 = applyStartupAssist(outputM1, TURN_BREAKAWAY_KICK_OUTPUT);
+    outputM2 = applyStartupAssist(outputM2, TURN_BREAKAWAY_KICK_OUTPUT);
+    outputM3 = applyStartupAssist(outputM3, TURN_BREAKAWAY_KICK_OUTPUT);
+    outputM4 = applyStartupAssist(outputM4, TURN_BREAKAWAY_KICK_OUTPUT);
+  } else if (assistActive && startupAssistMode == STARTUP_ASSIST_TURN) {
+    outputM1 = applyStartupAssist(outputM1, TURN_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM2 = applyStartupAssist(outputM2, TURN_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM3 = applyStartupAssist(outputM3, TURN_STARTUP_ASSIST_MIN_OUTPUT);
+    outputM4 = applyStartupAssist(outputM4, TURN_STARTUP_ASSIST_MIN_OUTPUT);
+  }
+
+  // Recover only the wheels whose fresh AT8236 velocity telemetry still says
+  // "not moving".  This handles the observed M1/M4 reverse-direction stall
+  // without reintroducing a permanent left/right speed bias.
+  if (straightStallM1) outputM1 = applyStartupAssist(outputM1, STRAIGHT_STALL_BOOST_OUTPUT);
+  if (straightStallM2) outputM2 = applyStartupAssist(outputM2, STRAIGHT_STALL_BOOST_OUTPUT);
+  if (straightStallM3) outputM3 = applyStartupAssist(outputM3, STRAIGHT_STALL_BOOST_OUTPUT);
+  if (straightStallM4) outputM4 = applyStartupAssist(outputM4, STRAIGHT_STALL_BOOST_OUTPUT);
   sendSpeed(outputM1, outputM2, outputM3, outputM4);
 
-  unsigned long now = millis();
   if (usbDiagnosticsEnabled &&
       (lastDiagnosticDriveLogMs == 0 || now - lastDiagnosticDriveLogMs >= USB_DIAGNOSTIC_SAMPLE_MS)) {
     lastDiagnosticDriveLogMs = now;
@@ -247,7 +455,18 @@ void sendDriveSpeed(int m1, int m2, int m3, int m4) {
         ",current=" + String(currentM1) + "," + String(currentM2) + "," +
         String(currentM3) + "," + String(currentM4) +
         ",spd=" + String(outputM1) + "," + String(outputM2) + "," +
-        String(outputM3) + "," + String(outputM4));
+        String(outputM3) + "," + String(outputM4) +
+        ",turn_floor=" + String(turnFloorActive ? 1 : 0) +
+        ",startup_assist=" + String(assistActive ? 1 : 0) +
+        ",startup_assist_mode=" + String(assistActive ? startupAssistModeName(startupAssistMode) : "none") +
+        ",straight_kick=" + String(straightKickActive ? 1 : 0) +
+        ",straight_stall_mask=" + String(straightStallM1 ? 1 : 0) +
+          String(straightStallM2 ? 1 : 0) + String(straightStallM3 ? 1 : 0) +
+          String(straightStallM4 ? 1 : 0) +
+        ",turn_kick=" + String(turnKickActive ? 1 : 0) +
+        ",mspd=" + String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+        String(latestMspdM3, 2) + "," + String(latestMspdM4, 2) +
+        ",mspd_age_ms=" + (lastMspdFrameMs == 0 ? String(-1) : String((long)(now - lastMspdFrameMs))));
   }
 }
 
@@ -260,6 +479,18 @@ void zeroTargetsAndCurrents() {
   currentM2 = 0;
   currentM3 = 0;
   currentM4 = 0;
+  startupAssistUntilMs = 0;
+  startupAssistStartMs = 0;
+  startupAssistMode = STARTUP_ASSIST_NONE;
+}
+
+void clearReversalHistory() {
+  hasLastNonzeroTarget = false;
+  lastNonzeroM1 = 0;
+  lastNonzeroM2 = 0;
+  lastNonzeroM3 = 0;
+  lastNonzeroM4 = 0;
+  reversalNeutralSinceMs = 0;
 }
 
 void sendImmediateStopToDriver() {
@@ -288,6 +519,7 @@ void enterState(SystemState nextState) {
 void stopAndRelease(SystemState nextState) {
   sendImmediateStopToDriver();
   releaseOwner();
+  clearReversalHistory();
   if (!isLatchedState()) {
     enterState(nextState);
   }
@@ -416,7 +648,9 @@ void beginReversalBlock() {
 void startReversalNeutralWindow() {
   if (systemState == REVERSAL_BLOCKED && reversalNeutralSinceMs == 0) {
     reversalNeutralSinceMs = millis();
-    usbDiagnostic("reversal_neutral", "started=1");
+    usbDiagnostic("reversal_neutral", "started=1,mspd=" +
+      String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+      String(latestMspdM3, 2) + "," + String(latestMspdM4, 2));
   }
 }
 
@@ -471,6 +705,15 @@ void printStatusToUsb() {
   line += String(currentM1) + "," + String(currentM2) + "," + String(currentM3) + "," + String(currentM4);
   line += ",motor_frame_age_ms=";
   line += lastValidMotorFrameMs == 0 ? String(-1) : String((long)(millis() - lastValidMotorFrameMs));
+  line += ",mspd=";
+  line += String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+          String(latestMspdM3, 2) + "," + String(latestMspdM4, 2);
+  line += ",mspd_age_ms=";
+  line += lastMspdFrameMs == 0 ? String(-1) : String((long)(millis() - lastMspdFrameMs));
+  line += ",startup_assist=";
+  line += (startupAssistActive(millis()) ? "1" : "0");
+  line += ",startup_assist_mode=";
+  line += (startupAssistActive(millis()) ? startupAssistModeName(startupAssistMode) : "none");
   line += ",diag=";
   line += usbDiagnosticsEnabled ? "1" : "0";
   line += ",motion_count=";
@@ -528,26 +771,61 @@ void handleMotionCommand(ControlSource source, const String &line) {
     return;
   }
 
-  recordMotionCommand(source, (int)left, (int)right);
-
   if (left == 0 && right == 0) {
+    if (stopCommandIsRedundant()) {
+      lastMotionCommandAccepted = true;
+      if (!isLatchedState() && at8236Ready && systemState != READY_STOP) {
+        enterState(READY_STOP);
+      }
+      sendLine(source, "!OK,stop\n");
+      return;
+    }
+
+    recordMotionCommand(source, (int)left, (int)right);
     lastMotionCommandAccepted = true;
     sendImmediateStopToDriver();
     if (!isLatchedState()) {
       releaseOwner();
       if (systemState == REVERSAL_BLOCKED) {
-        startReversalNeutralWindow();
+        // pollTimeouts() starts the neutral timer only after fresh telemetry
+        // proves every wheel is actually stopped.
       } else {
-        enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+        // $spd:0 makes the controller stop commanding the wheels, but it
+        // cannot make a moving wheel physically reach zero at once.  Keep
+        // the previous direction through an explicit c0,0 and hold the next
+        // non-zero command until fresh MSPD proves a full neutral interval.
+        // This closes the BLE race: forward -> c0,0 -> reverse can no longer
+        // energize a reverse command while any wheel is still coasting ahead.
+        if (hasLastNonzeroTarget) {
+          reversalNeutralSinceMs = 0;
+          enterState(REVERSAL_BLOCKED);
+          usbDiagnostic(
+            "reversal_wait",
+            "reason=explicit_stop,last_target=" + String(lastNonzeroM1) + "," +
+              String(lastNonzeroM2) + "," + String(lastNonzeroM3) + "," +
+              String(lastNonzeroM4) + ",zero_limit=" +
+              String(STARTUP_ASSIST_MSPD_ZERO_LIMIT, 2));
+        } else {
+          enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+        }
       }
     }
     sendLine(source, "!OK,stop\n");
     return;
   }
 
+  recordMotionCommand(source, (int)left, (int)right);
+
   if (systemState == REVERSAL_BLOCKED) {
-    reversalNeutralSinceMs = 0;
-    usbDiagnostic("reversal_reject", "reason=neutral_required");
+    // Android keeps sending the held direction roughly every 100 ms.  Those
+    // frames must stay rejected until the wheels have settled, but they must
+    // not restart the already-running neutral timer; otherwise a user who
+    // holds Reverse after Forward can never leave REVERSAL_BLOCKED.
+    usbDiagnostic(
+      "reversal_reject",
+      "reason=neutral_required,neutral_age_ms=" +
+        (reversalNeutralSinceMs == 0 ? String(-1) :
+          String((long)(millis() - reversalNeutralSinceMs))));
     reportError(source, "reversal/neutral");
     return;
   }
@@ -555,10 +833,6 @@ void handleMotionCommand(ControlSource source, const String &line) {
   if (!canAcceptMotion(source, (int)left, (int)right)) {
     reportError(source, isLatchedState() ? "latched" : "owner/busy");
     return;
-  }
-
-  if (owner == SOURCE_NONE) {
-    owner = source;
   }
 
   int nextM1, nextM2, nextM3, nextM4;
@@ -569,10 +843,92 @@ void handleMotionCommand(ControlSource source, const String &line) {
     return;
   }
 
+  unsigned long now = millis();
+  // BLE may deliver a second refresh before the 40 ms control task sends the
+  // first non-zero current.  Do not restart the same launch-assist window in
+  // that gap; restarting it makes the breakaway duration depend on BLE timing.
+  bool startupAssistInProgress =
+    startupAssistMode != STARTUP_ASSIST_NONE && startupAssistActive(now);
+  bool startingFromStop =
+    currentM1 == 0 && currentM2 == 0 && currentM3 == 0 && currentM4 == 0 &&
+    !startupAssistInProgress;
+  if (startingFromStop && !mspdStationaryForStartup(now)) {
+    startupAssistUntilMs = 0;
+    startupAssistStartMs = 0;
+    startupAssistMode = STARTUP_ASSIST_NONE;
+    usbDiagnostic(
+      "motion_start_blocked",
+      "reason=mspd_not_stationary,mspd=" +
+        String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+        String(latestMspdM3, 2) + "," + String(latestMspdM4, 2) +
+        ",mspd_age_ms=" +
+        (lastMspdFrameMs == 0 ? String(-1) : String((long)(now - lastMspdFrameMs))));
+    sendImmediateStopToDriver();
+    releaseOwner();
+    if (!isLatchedState()) {
+      enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+    }
+    reportError(source, "settling");
+    return;
+  }
+
+  if (owner == SOURCE_NONE) {
+    // A USB h<timeout> setting is useful for a supervised single-command
+    // bench test, but must never silently weaken the normal BLE deadman.
+    // The Android controller refreshes c continuously, so its session always
+    // starts from the 500 ms safety timeout.
+    if (source == SOURCE_BLE && commandTimeoutMs != DEFAULT_COMMAND_TIMEOUT_MS) {
+      usbDiagnostic(
+        "ble_timeout_reset",
+        "from_ms=" + String(commandTimeoutMs) +
+          ",to_ms=" + String(DEFAULT_COMMAND_TIMEOUT_MS));
+      commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+    }
+    owner = source;
+  }
+
   setWheelTargets(nextM1, nextM2, nextM3, nextM4);
+  if (startingFromStop) {
+    startupAssistMode = startupAssistModeForCommand((int)left, (int)right);
+    unsigned long assistDurationMs = startupAssistDurationMs(startupAssistMode);
+    startupAssistUntilMs = assistDurationMs == 0 ? 0 : now + assistDurationMs;
+    startupAssistStartMs = assistDurationMs == 0 ? 0 : now;
+
+    if (startupAssistMode == STARTUP_ASSIST_STRAIGHT) {
+      usbDiagnostic(
+        "startup_assist",
+        "mode=straight,duration_ms=" + String(assistDurationMs) +
+          ",kick_ms=" + String(STRAIGHT_BREAKAWAY_KICK_MS) +
+          ",kick_output=" + String(M1_STRAIGHT_BREAKAWAY_KICK_OUTPUT) + "/" +
+            String(M2_STRAIGHT_BREAKAWAY_KICK_OUTPUT) + "/" +
+            String(M3_STRAIGHT_BREAKAWAY_KICK_OUTPUT) + "/" +
+            String(M4_STRAIGHT_BREAKAWAY_KICK_OUTPUT) +
+          ",straight_start_min=" + String(M1_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) + "/" +
+            String(M2_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) + "/" +
+            String(M3_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) + "/" +
+            String(M4_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) +
+          ",stall_boost=" + String(STRAIGHT_STALL_BOOST_OUTPUT) +
+          ",mspd=" + String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+          String(latestMspdM3, 2) + "," + String(latestMspdM4, 2));
+    } else if (startupAssistMode == STARTUP_ASSIST_TURN) {
+      usbDiagnostic(
+        "startup_assist",
+        "mode=turn,duration_ms=" + String(assistDurationMs) +
+          ",kick_ms=" + String(TURN_BREAKAWAY_KICK_MS) +
+          ",kick_output=" + String(TURN_BREAKAWAY_KICK_OUTPUT) +
+          ",turn_start_min=" + String(TURN_STARTUP_ASSIST_MIN_OUTPUT) +
+          ",turn_hold_min=" + String(TURN_HOLD_MIN_OUTPUT) +
+          ",mspd=" + String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
+          String(latestMspdM3, 2) + "," + String(latestMspdM4, 2));
+    } else {
+      usbDiagnostic(
+        "startup_assist_disabled",
+        "reason=unsupported_motion,left=" + String(left) + ",right=" + String(right));
+    }
+  }
   rememberNonzeroTargets();
   recordMotionTargets();
-  ownerLastActivityMs = millis();
+  ownerLastActivityMs = now;
   lastMotionCommandMs = ownerLastActivityMs;
   enterState(MANUAL_ACTIVE);
   sendLine(source, "!OK,c\n");
@@ -765,6 +1121,38 @@ bool isRecognizedMotorFrame(const String &frame) {
   return isNumericTelemetryPayload(payload, 4);
 }
 
+bool parseMspdFrame(const String &frame, float &m1, float &m2, float &m3, float &m4) {
+  if (!frame.startsWith("$MSPD:") || !frame.endsWith("#")) {
+    return false;
+  }
+
+  String payload = frame.substring(6, frame.length() - 1);
+  float values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  int start = 0;
+  for (int i = 0; i < 4; ++i) {
+    int end = (i == 3) ? payload.length() : payload.indexOf(',', start);
+    if (end < start) {
+      return false;
+    }
+    String token = payload.substring(start, end);
+    token.trim();
+    if (token.length() == 0) {
+      return false;
+    }
+    values[i] = token.toFloat();
+    start = end + 1;
+  }
+  if (start < payload.length() + 1) {
+    return false;
+  }
+
+  m1 = values[0];
+  m2 = values[1];
+  m3 = values[2];
+  m4 = values[3];
+  return true;
+}
+
 void updateReadyStateFromTelemetry() {
   if (!at8236Ready && lastValidMotorFrameMs != 0) {
     at8236Ready = true;
@@ -791,6 +1179,9 @@ void readMotorFrames() {
     if (c == '#') {
       if (isRecognizedMotorFrame(motorFrame)) {
         lastValidMotorFrameMs = millis();
+        if (parseMspdFrame(motorFrame, latestMspdM1, latestMspdM2, latestMspdM3, latestMspdM4)) {
+          lastMspdFrameMs = lastValidMotorFrameMs;
+        }
         updateReadyStateFromTelemetry();
       }
       motorFrame = "";
@@ -906,16 +1297,26 @@ void pollUsbSerial() {
 void pollTimeouts() {
   unsigned long now = millis();
 
-  if (systemState == REVERSAL_BLOCKED && reversalNeutralSinceMs != 0 &&
-      now - reversalNeutralSinceMs >= REVERSAL_NEUTRAL_MS) {
-    hasLastNonzeroTarget = false;
-    lastNonzeroM1 = 0;
-    lastNonzeroM2 = 0;
-    lastNonzeroM3 = 0;
-    lastNonzeroM4 = 0;
-    reversalNeutralSinceMs = 0;
-    enterState(at8236Ready ? READY_STOP : BOOT_STOP);
-    usbDiagnostic("reversal_rearmed", "neutral_ms=" + String(REVERSAL_NEUTRAL_MS));
+  if (systemState == REVERSAL_BLOCKED) {
+    // Do not use only elapsed time after c0,0.  The physical cart may still
+    // coast, especially after a straight-line startup assist.  The entire
+    // neutral window must consist of fresh, near-zero MSPD from all wheels.
+    if (!mspdStationaryForStartup(now)) {
+      if (reversalNeutralSinceMs != 0) {
+        usbDiagnostic(
+          "reversal_neutral",
+          "reset=motion,mspd=" + String(latestMspdM1, 2) + "," +
+            String(latestMspdM2, 2) + "," + String(latestMspdM3, 2) + "," +
+            String(latestMspdM4, 2));
+      }
+      reversalNeutralSinceMs = 0;
+    } else if (reversalNeutralSinceMs == 0) {
+      startReversalNeutralWindow();
+    } else if (now - reversalNeutralSinceMs >= REVERSAL_NEUTRAL_MS) {
+      clearReversalHistory();
+      enterState(at8236Ready ? READY_STOP : BOOT_STOP);
+      usbDiagnostic("reversal_rearmed", "neutral_ms=" + String(REVERSAL_NEUTRAL_MS));
+    }
   }
 
   if (!at8236Ready && now - bootStartMs > AT8236_BOOT_WAIT_MS && lastValidMotorFrameMs == 0) {
@@ -928,10 +1329,15 @@ void pollTimeouts() {
   }
 
   // Heartbeats prove that the link is alive; repeated c commands prove that the
-  // control producer is alive. Either watchdog may stop a moving cart.
+  // control producer is alive.  The default freshness interval is 500 ms.  A
+  // deliberate h<timeout_ms> command may extend both intervals together for
+  // USB/bench manual testing, but never beyond the bounded safety maximum.
   if (systemState == MANUAL_ACTIVE && owner != SOURCE_NONE &&
-      now - lastMotionCommandMs > MOTION_REFRESH_TIMEOUT_MS) {
-    usbDiagnostic("motion_timeout", "age_ms=" + String(now - lastMotionCommandMs));
+      now - lastMotionCommandMs > commandTimeoutMs) {
+    usbDiagnostic(
+      "motion_timeout",
+      "age_ms=" + String(now - lastMotionCommandMs) +
+        ",limit_ms=" + String(commandTimeoutMs));
     stopAndRelease(COM_TIMEOUT);
   }
 

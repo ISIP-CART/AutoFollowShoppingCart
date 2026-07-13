@@ -15,11 +15,17 @@ static const unsigned long MOTOR_BAUD = 115200;
 static const int MAX_TEST_SPEED = 40;
 static const unsigned long MIN_TEST_MS = 100;
 static const unsigned long MAX_TEST_MS = 1500;
-static const unsigned long ARM_WINDOW_MS = 60000;
+// Keep the raised-wheel test session open long enough to test all four motors.
+// The session is still cancelled immediately by !S, telemetry loss, malformed
+// input, or any other safety fault.
+static const unsigned long ARM_WINDOW_MS = 180000;
 static const unsigned long COOLDOWN_MS = 1000;
 static const unsigned long TELEMETRY_TIMEOUT_MS = 1000;
 static const unsigned long MIN_RAW_INTERVAL_MS = 20;
 static const unsigned long MAX_RAW_INTERVAL_MS = 1000;
+// !U controls telemetry sampling, while console output is coalesced to this
+// interval so the monitor remains readable during a long calibration run.
+static const unsigned long TELEMETRY_SUMMARY_INTERVAL_MS = 500;
 static const size_t MAX_LINE_LEN = 80;
 static const size_t MAX_MOTOR_FRAME_LEN = 100;
 
@@ -32,6 +38,9 @@ bool telemetrySeen = false;
 unsigned long lastTelemetryMs = 0;
 unsigned long rawTelemetryIntervalMs = 0;
 unsigned long lastRawTelemetryMs = 0;
+String latestMspd;
+String latestMtep;
+String latestMAll;
 bool armed = false;
 unsigned long armedUntilMs = 0;
 bool testActive = false;
@@ -90,6 +99,24 @@ void disarmAndStop(const String &reason) {
 
 bool telemetryAlive() {
   return telemetrySeen && millis() - lastTelemetryMs <= TELEMETRY_TIMEOUT_MS;
+}
+
+void printTelemetrySummary() {
+  unsigned long outputInterval = rawTelemetryIntervalMs > TELEMETRY_SUMMARY_INTERVAL_MS
+                                   ? rawTelemetryIntervalMs
+                                   : TELEMETRY_SUMMARY_INTERVAL_MS;
+  if (rawTelemetryIntervalMs == 0 ||
+      (lastRawTelemetryMs != 0 && millis() - lastRawTelemetryMs < outputInterval)) {
+    return;
+  }
+  lastRawTelemetryMs = millis();
+  String details = "mspd=";
+  details += (latestMspd.length() > 0 ? latestMspd : "NA");
+  details += ",mtep=";
+  details += (latestMtep.length() > 0 ? latestMtep : "NA");
+  details += ",mall=";
+  details += (latestMAll.length() > 0 ? latestMAll : "NA");
+  printEvent("telemetry", details);
 }
 
 bool parseLongStrict(const String &text, long &value) {
@@ -154,11 +181,9 @@ void serviceMotorTelemetry() {
     if (motorFrame.length() == 0) continue;
     motorFrame += c;
     if (c == '#') {
-      if (isKnownTelemetryFrame(motorFrame) && rawTelemetryIntervalMs > 0 &&
-          (lastRawTelemetryMs == 0 || millis() - lastRawTelemetryMs >= rawTelemetryIntervalMs)) {
-        lastRawTelemetryMs = millis();
-        printEvent("telemetry", "frame=" + motorFrame);
-      }
+      if (motorFrame.startsWith("$MSPD:")) latestMspd = motorFrame;
+      else if (motorFrame.startsWith("$MTEP:")) latestMtep = motorFrame;
+      else if (motorFrame.startsWith("$MAll:")) latestMAll = motorFrame;
       if (isValidTelemetry(motorFrame)) {
         telemetrySeen = true;
         lastTelemetryMs = millis();
@@ -219,7 +244,7 @@ void handleArm(const String &line) {
   armed = true;
   armedUntilMs = millis() + ARM_WINDOW_MS;
   Serial.println("!OK,A");
-  printEvent("armed", "window_ms=60000");
+  printEvent("armed", "window_ms=" + String(ARM_WINDOW_MS));
 }
 
 void handleRawTelemetry(const String &line) {
@@ -398,5 +423,6 @@ void setup() {
 void loop() {
   pollUsb();
   serviceMotorTelemetry();
+  printTelemetrySummary();
   serviceSafety();
 }
