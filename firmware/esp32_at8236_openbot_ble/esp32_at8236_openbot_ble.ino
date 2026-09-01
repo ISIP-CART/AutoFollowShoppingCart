@@ -122,6 +122,7 @@ enum SystemState {
 enum StartupAssistMode {
   STARTUP_ASSIST_NONE = 0,
   STARTUP_ASSIST_STRAIGHT,
+  STARTUP_ASSIST_CURVE,
   STARTUP_ASSIST_TURN
 };
 
@@ -286,6 +287,8 @@ const char *startupAssistModeName(StartupAssistMode mode) {
   switch (mode) {
     case STARTUP_ASSIST_STRAIGHT:
       return "straight";
+    case STARTUP_ASSIST_CURVE:
+      return "curve";
     case STARTUP_ASSIST_TURN:
       return "turn";
     case STARTUP_ASSIST_NONE:
@@ -326,6 +329,18 @@ int applyStartupAssist(int output, int minimumAbs) {
   return output > 0 ? minimumAbs : -minimumAbs;
 }
 
+// Forward curves need enough breakaway torque on both sides, but unlike straight
+// launch assist they must retain the requested left/right ratio.
+int applyProportionalStartupAssist(int output, int largestAbs, int outerMinimumAbs) {
+  if (output == 0 || largestAbs <= 0) {
+    return output;
+  }
+
+  int requestedAbs = abs(output);
+  int proportionalMinimum = (outerMinimumAbs * requestedAbs + largestAbs / 2) / largestAbs;
+  return applyStartupAssist(output, proportionalMinimum);
+}
+
 bool isPureTurnTarget(int m1, int m2, int m3, int m4) {
   return m1 != 0 && m1 == m2 && m3 == m4 && m1 == -m3;
 }
@@ -338,6 +353,12 @@ bool turnBreakawayKickActive(unsigned long now) {
 
 bool straightBreakawayKickActive(unsigned long now) {
   return startupAssistMode == STARTUP_ASSIST_STRAIGHT &&
+         startupAssistStartMs != 0 &&
+         now - startupAssistStartMs < STRAIGHT_BREAKAWAY_KICK_MS;
+}
+
+bool curveBreakawayKickActive(unsigned long now) {
+  return startupAssistMode == STARTUP_ASSIST_CURVE &&
          startupAssistStartMs != 0 &&
          now - startupAssistStartMs < STRAIGHT_BREAKAWAY_KICK_MS;
 }
@@ -360,6 +381,11 @@ StartupAssistMode startupAssistModeForCommand(int left, int right) {
     return STARTUP_ASSIST_STRAIGHT;
   }
 
+  if (left != right && left != 0 && right != 0 && ((left > 0) == (right > 0)) &&
+      min(abs(left), abs(right)) >= 10 && max(abs(left), abs(right)) >= 12) {
+    return STARTUP_ASSIST_CURVE;
+  }
+
   if (left == -right && abs(left) >= 5) {
     return STARTUP_ASSIST_TURN;
   }
@@ -370,6 +396,7 @@ StartupAssistMode startupAssistModeForCommand(int left, int right) {
 unsigned long startupAssistDurationMs(StartupAssistMode mode) {
   switch (mode) {
     case STARTUP_ASSIST_STRAIGHT:
+    case STARTUP_ASSIST_CURVE:
       return STRAIGHT_STARTUP_ASSIST_MS;
     case STARTUP_ASSIST_TURN:
       return TURN_STARTUP_ASSIST_MS;
@@ -399,6 +426,10 @@ void sendDriveSpeed(int m1, int m2, int m3, int m4) {
   bool turnFloorActive = isPureTurnTarget(m1, m2, m3, m4);
   bool turnKickActive = assistActive && turnFloorActive && turnBreakawayKickActive(now);
   bool straightKickActive = assistActive && straightBreakawayKickActive(now);
+  bool curveKickActive = assistActive && curveBreakawayKickActive(now);
+  bool curveAssistActive = assistActive && startupAssistMode == STARTUP_ASSIST_CURVE;
+  int largestCurveOutput =
+    max(max(abs(outputM1), abs(outputM2)), max(abs(outputM3), abs(outputM4)));
   bool straightStallCheckActive =
     assistActive &&
     startupAssistMode == STARTUP_ASSIST_STRAIGHT &&
@@ -425,6 +456,13 @@ void sendDriveSpeed(int m1, int m2, int m3, int m4) {
     outputM2 = applyStartupAssist(outputM2, M2_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
     outputM3 = applyStartupAssist(outputM3, M3_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
     outputM4 = applyStartupAssist(outputM4, M4_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT);
+  } else if (curveAssistActive) {
+    int curveOuterMinimum = curveKickActive ? M1_STRAIGHT_BREAKAWAY_KICK_OUTPUT :
+      M1_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT;
+    outputM1 = applyProportionalStartupAssist(outputM1, largestCurveOutput, curveOuterMinimum);
+    outputM2 = applyProportionalStartupAssist(outputM2, largestCurveOutput, curveOuterMinimum);
+    outputM3 = applyProportionalStartupAssist(outputM3, largestCurveOutput, curveOuterMinimum);
+    outputM4 = applyProportionalStartupAssist(outputM4, largestCurveOutput, curveOuterMinimum);
   } else if (turnKickActive) {
     outputM1 = applyStartupAssist(outputM1, TURN_BREAKAWAY_KICK_OUTPUT);
     outputM2 = applyStartupAssist(outputM2, TURN_BREAKAWAY_KICK_OUTPUT);
@@ -909,7 +947,15 @@ void handleMotionCommand(ControlSource source, const String &line) {
             String(M4_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) +
           ",stall_boost=" + String(STRAIGHT_STALL_BOOST_OUTPUT) +
           ",mspd=" + String(latestMspdM1, 2) + "," + String(latestMspdM2, 2) + "," +
-          String(latestMspdM3, 2) + "," + String(latestMspdM4, 2));
+            String(latestMspdM3, 2) + "," + String(latestMspdM4, 2));
+    } else if (startupAssistMode == STARTUP_ASSIST_CURVE) {
+      usbDiagnostic(
+        "startup_assist",
+        "mode=curve,duration_ms=" + String(assistDurationMs) +
+          ",kick_ms=" + String(STRAIGHT_BREAKAWAY_KICK_MS) +
+          ",outer_kick=" + String(M1_STRAIGHT_BREAKAWAY_KICK_OUTPUT) +
+          ",outer_hold=" + String(M1_STRAIGHT_STARTUP_ASSIST_MIN_OUTPUT) +
+          ",left=" + String(left) + ",right=" + String(right));
     } else if (startupAssistMode == STARTUP_ASSIST_TURN) {
       usbDiagnostic(
         "startup_assist",
@@ -925,6 +971,14 @@ void handleMotionCommand(ControlSource source, const String &line) {
         "startup_assist_disabled",
         "reason=unsupported_motion,left=" + String(left) + ",right=" + String(right));
     }
+  } else if (startupAssistInProgress && startupAssistMode == STARTUP_ASSIST_STRAIGHT &&
+             startupAssistModeForCommand((int)left, (int)right) == STARTUP_ASSIST_CURVE) {
+    // A person may move sideways just after a centered c14,14 launch.  Preserve
+    // the current assist window, but stop flattening the requested wheel ratio.
+    startupAssistMode = STARTUP_ASSIST_CURVE;
+    usbDiagnostic(
+      "startup_assist_retarget",
+      "from=straight,to=curve,left=" + String(left) + ",right=" + String(right));
   }
   rememberNonzeroTargets();
   recordMotionTargets();
