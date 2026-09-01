@@ -1,5 +1,11 @@
 # ESP32 + AT8236 OpenBot BLE 安全遥控固件
 
+> **旧版联调固件，请勿作为当前实车推荐烧录版本。** 当前实车 BLE 手动控制与
+> 自动跟随统一使用
+> `firmware/esp32_at8236_velocity_ble/esp32_at8236_velocity_ble.ino`。
+> 本目录保留用于追溯早期低速 trim、起步辅助和换向联调，不应把其中的
+> `STARTUP_ASSIST_CURVE`、kick 或轮间 trim 直接复制到速度闭环固件。
+
 这个目录提供一份独立的 Arduino 固件，用于 `ESP32 WROOM-32E + AT8236 + OpenBot BLE` 的低速安全手动遥控。它不启动 WiFi，不包含网页遥控，不接自动跟随输出，也不替换现有台架测试固件。
 
 ## 适用范围
