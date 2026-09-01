@@ -1,5 +1,11 @@
 # 真实小车 BLE 与四轮电机联调测试指南
 
+> **2026-09-01 固件基线更新**：当前唯一推荐烧录的实车固件是
+> `firmware/esp32_at8236_velocity_ble/esp32_at8236_velocity_ble.ino`。
+> 本文后部保留的早期 trim、起步辅助、固定中立等待和
+> `esp32_at8236_openbot_ble` 测试记录仅用于历史追溯；若与新固件 README 冲突，
+> 以 `firmware/README.md` 和速度闭环 BLE 固件 README 为准。
+
 ## 1. 测试目的
 
 本次测试要回答三个问题：
@@ -21,14 +27,14 @@
 
 ## 3. 当前软件版本
 
-截至 2026-07-13：
+截至 2026-09-01：
 
-- 正式 BLE 固件已加入 USB 诊断和安全换向保护。
+- 当前速度闭环 BLE 固件已加入 USB 诊断、`$MSPD` 反馈保护、主动制动和换向等待。
 - 四轮 USB 标定固件位于：
   `firmware/esp32_at8236_calibration/esp32_at8236_calibration.ino`
 - 正式 BLE 固件位于：
-  `firmware/esp32_at8236_openbot_ble/esp32_at8236_openbot_ble.ino`
-- Android 上位机提交：`e1c5238`。
+  `firmware/esp32_at8236_velocity_ble/esp32_at8236_velocity_ble.ino`
+- `firmware/esp32_at8236_openbot_ble/` 已降级为早期联调历史版本。
 - Android Debug APK：
   `dev/OpenBot/android/robot/build/outputs/apk/debug/robot-debug.apk`
 
@@ -36,18 +42,19 @@
 
 ### 当前已经完成
 
-- 正式 BLE 固件可以记录 Android 命令、四轮 target/current 和 `$spd`。
+- 正式 BLE 固件可以记录 Android 命令、四轮 target/current、`$spd` 和 `$MSPD`。
 - 独立标定固件可以逐个测试 M1-M4，并输出原始 AT8236 遥测。
-- 正式 BLE 固件可以阻止目标值直接反转，进入 `REVERSAL_BLOCKED` 后保持四轮零速。
+- 正式 BLE 固件可以阻止目标值直接反转，进入 `BRAKING` 后等待四轮 `$MSPD`
+  连续 400 ms 低于 30 mm/s，再接收新的运动刷新。
 - Android 可以记录触摸、pointer、generation、BLE 队列和 GATT 写入结果。
-- 车轮悬空标定已初步确认 `$MSPD` 字段顺序、速度符号关系和 M1/M2 交换测试结论。
+- 速度闭环实车测试已确认 `$MSPD` 字段顺序、速度符号、四轮映射和主动制动有效。
 
 ### 当前还没有完成
 
-- 尚未完成四轮在落地负载下的最低可靠速度确认。
-- 正式 BLE 固件尚未根据真实 `$MSPD` 自动判断四轮已经停稳。
-- 当前换向保护仍使用人工松键并等待 1 秒的保守流程；悬空实测显示停止尾速可能超过 1 秒，后续应升级为实测过零联锁或延长中立等待。
-- 真机悬空和落地验收尚未完成，自动跟随仍不能开放。
+- 动态缓弯 `c10,14`、`c14,10` 及中间档位仍需完成成对的悬空 `$MSPD` 验收。
+- BLE 断连、500 ms 运动保鲜、750 ms 链路超时和 `!S` 锁存急停仍需按新固件
+  README 留存一组正式验收日志。
+- 阶段 N 载物测试继续暂停；动态缓弯和通信安全验收通过后再决定是否恢复。
 
 ## 4. 测试工具
 
@@ -298,7 +305,7 @@ M1/M2 互换后的关键数据如下：
 烧录：
 
 ```text
-firmware/esp32_at8236_openbot_ble/esp32_at8236_openbot_ble.ino
+firmware/esp32_at8236_velocity_ble/esp32_at8236_velocity_ble.ino
 ```
 
 烧录后重新启动 ESP32。确认手机能够连接：

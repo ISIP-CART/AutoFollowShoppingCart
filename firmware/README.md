@@ -1,0 +1,25 @@
+# 下位机固件目录说明
+
+## 当前推荐烧录
+
+实车 BLE 手动控制与自动跟随统一使用：
+
+`firmware/esp32_at8236_velocity_ble/esp32_at8236_velocity_ble.ino`
+
+这是当前唯一推荐烧录的实车运行固件。它使用 AT8236 `$spd` 的 mm/s 速度闭环，
+读取 `$MSPD` 做方向、超速、遥测和制动检查，并兼容 Android 现有
+`f / r / h / c / !S` 协议。动态缓弯继续使用 `c<left>,<right>`，不新增协议。
+
+## 其他目录的定位
+
+| 目录 | 定位 | 是否用于当前实车运行 |
+|---|---|---|
+| `esp32_at8236_velocity_ble/` | 当前速度闭环 BLE 正式固件 | 是，唯一推荐 |
+| `esp32_at8236_velocity_validation/` | USB 速度、转向、横移和弧线受控验证 | 否，仅专项验证 |
+| `esp32_at8236_openbot_ble/` | 早期低速 BLE 联调固件，包含旧 trim / 起步辅助方案 | 否，历史参考 |
+| `esp32_at8236_calibration/` | 四轮/单轮悬空标定 | 否，仅标定 |
+| `esp32_at8236_m1_test/` | M1 早期专项测试 | 否，历史测试 |
+
+不要把旧版 `esp32_at8236_openbot_ble` 中的起步 kick、轮间 trim 或
+`STARTUP_ASSIST_CURVE` 直接复制到速度闭环固件。只有新的 `$spd/$MSPD` 实测证明
+某一速度区间无法可靠起步时，才针对速度闭环重新设计和验证补偿。
