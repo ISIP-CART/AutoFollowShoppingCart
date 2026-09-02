@@ -41,16 +41,16 @@ static const float AT8236_WHEEL_DIAMETER_MM = 80.0f;
 static const int AT8236_DEADZONE = 1600;
 
 // The existing OpenBot cart-follow output tops out at logical 14.  Raise that
-// operating point from 100 to 160 mm/s, while reserving logical 15..21 for a
-// staged higher-speed interface.  Logical 21 reaches the hard 240 mm/s limit;
+// operating point to 240 mm/s, while reserving logical 15..21 for a staged
+// higher-speed interface.  Logical 21 reaches the hard 360 mm/s limit;
 // larger legacy inputs remain protocol-compatible but cannot exceed it.
-// The original landed tests proved 100 mm/s, so 160/200/240 must be admitted
+// The original landed tests proved the lower ranges, so 240/310/360 must be admitted
 // progressively with raised-wheel, braking and open-floor validation.
 static const int PROTOCOL_INPUT_LIMIT = 255;
 static const int PROTOCOL_FULL_SPEED_INPUT = 21;
-static const int MAX_WHEEL_SPEED_MMPS = 240;
+static const int MAX_WHEEL_SPEED_MMPS = 360;
 static const int MIN_MOVING_WHEEL_MMPS = 40;
-static const int MIN_PIVOT_WHEEL_MMPS = 80;
+static const int MIN_PIVOT_WHEEL_MMPS = 120;
 static const int CONTROL_RAMP_STEP_MMPS = 20;
 static const unsigned long CONTROL_PERIOD_MS = 50;
 
@@ -365,8 +365,8 @@ void calculateWheelTargets(int left, int right, int result[4]) {
   int leftMmps = scaleLogicalSide(left);
   int rightMmps = scaleLogicalSide(right);
 
-  // Stage I-M showed that 60 mm/s only starts pivoting and 80 mm/s is the
-  // reliable, smooth floor.  Apply it only to a true opposite-side pivot.
+  // Stage I-M showed that 80 mm/s pivots reliably but is still visually slow.
+  // Raise true opposite-side pivots to 120 mm/s without affecting gentle arcs.
   if (isPurePivot(left, right)) {
     leftMmps = leftMmps > 0 ? max(leftMmps, MIN_PIVOT_WHEEL_MMPS)
                             : min(leftMmps, -MIN_PIVOT_WHEEL_MMPS);
