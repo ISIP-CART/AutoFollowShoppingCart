@@ -40,12 +40,15 @@ static const int AT8236_ENCODER_LINES = 11;
 static const float AT8236_WHEEL_DIAMETER_MM = 80.0f;
 static const int AT8236_DEADZONE = 1600;
 
-// OpenBot cart-follow currently sends logical values up to 14.  Map that
-// range to the 100 mm/s ceiling already passed in landed tests.  Inputs above
-// 14 remain protocol-compatible but are saturated to the same safe ceiling.
+// The existing OpenBot cart-follow output tops out at logical 14.  Raise that
+// operating point from 100 to 160 mm/s, while reserving logical 15..21 for a
+// staged higher-speed interface.  Logical 21 reaches the hard 240 mm/s limit;
+// larger legacy inputs remain protocol-compatible but cannot exceed it.
+// The original landed tests proved 100 mm/s, so 160/200/240 must be admitted
+// progressively with raised-wheel, braking and open-floor validation.
 static const int PROTOCOL_INPUT_LIMIT = 255;
-static const int ANDROID_CART_FULL_SCALE = 14;
-static const int MAX_WHEEL_SPEED_MMPS = 100;
+static const int PROTOCOL_FULL_SPEED_INPUT = 21;
+static const int MAX_WHEEL_SPEED_MMPS = 240;
 static const int MIN_MOVING_WHEEL_MMPS = 40;
 static const int MIN_PIVOT_WHEEL_MMPS = 80;
 static const int CONTROL_RAMP_STEP_MMPS = 20;
@@ -65,6 +68,7 @@ static const float ZERO_SPEED_MMPS = 30.0f;
 static const float BRAKE_FALLBACK_SPEED_MMPS = 120.0f;
 static const float OVERSPEED_MIN_MMPS = 300.0f;
 static const float OVERSPEED_RATIO = 3.0f;
+static const float OVERSPEED_ABSOLUTE_MMPS = 500.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
 
 static const size_t MAX_PROTOCOL_LINE_LEN = 80;
@@ -347,8 +351,8 @@ int scaleLogicalSide(int logical) {
   logical = constrain(logical, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
   if (logical == 0) return 0;
   long magnitude = (long)abs(logical) * MAX_WHEEL_SPEED_MMPS;
-  int scaled = (int)((magnitude + ANDROID_CART_FULL_SCALE / 2) /
-                     ANDROID_CART_FULL_SCALE);
+  int scaled = (int)((magnitude + PROTOCOL_FULL_SPEED_INPUT / 2) /
+                     PROTOCOL_FULL_SPEED_INPUT);
   scaled = constrain(scaled, MIN_MOVING_WHEEL_MMPS, MAX_WHEEL_SPEED_MMPS);
   return logical > 0 ? scaled : -scaled;
 }
@@ -417,8 +421,10 @@ bool feedbackSafe() {
       feedbackMismatchSinceMs[i] = 0;
     }
 
-    float limit = max(OVERSPEED_MIN_MMPS,
-                      absFloat((float)targetWheelMmps[i]) * OVERSPEED_RATIO);
+    float limit = min(
+      OVERSPEED_ABSOLUTE_MMPS,
+      max(OVERSPEED_MIN_MMPS,
+          absFloat((float)targetWheelMmps[i]) * OVERSPEED_RATIO));
     if (absFloat(measured) > limit) {
       if (overspeedSinceMs[i] == 0) overspeedSinceMs[i] = now;
       if (now - overspeedSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
@@ -443,6 +449,8 @@ void printStatus() {
   Serial.print(",motion_age_ms=");
   Serial.print(lastMotionCommandMs ? (long)(millis() - lastMotionCommandMs) : -1);
   Serial.print(",accepted_motion_count="); Serial.print(acceptedMotionCount);
+  Serial.print(",speed_full_input="); Serial.print(PROTOCOL_FULL_SPEED_INPUT);
+  Serial.print(",speed_cap_mmps="); Serial.print(MAX_WHEEL_SPEED_MMPS);
   Serial.print(",logical="); Serial.print(logicalLeft); Serial.print(',');
   Serial.print(logicalRight);
   Serial.print(",target=");
