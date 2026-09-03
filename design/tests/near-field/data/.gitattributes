@@ -1,0 +1,2 @@
+# Preserve the original attachment bytes for the recorded SHA-256 values.
+*.txt -text
