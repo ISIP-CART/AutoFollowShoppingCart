@@ -50,7 +50,7 @@ static const int PROTOCOL_INPUT_LIMIT = 255;
 static const int PROTOCOL_FULL_SPEED_INPUT = 21;
 static const int MAX_WHEEL_SPEED_MMPS = 360;
 static const int MIN_MOVING_WHEEL_MMPS = 40;
-static const int MIN_PIVOT_WHEEL_MMPS = 120;
+static const int MIN_PIVOT_WHEEL_MMPS = 80;
 static const int CONTROL_RAMP_STEP_MMPS = 20;
 static const unsigned long CONTROL_PERIOD_MS = 50;
 
@@ -365,8 +365,9 @@ void calculateWheelTargets(int left, int right, int result[4]) {
   int leftMmps = scaleLogicalSide(left);
   int rightMmps = scaleLogicalSide(right);
 
-  // Stage I-M showed that 80 mm/s pivots reliably but is still visually slow.
-  // Raise true opposite-side pivots to 120 mm/s without affecting gentle arcs.
+  // Stage I-M showed that 80 mm/s is the reliable pivot floor.  Raising the
+  // global speed scale already maps logical +/-5 to about 86 mm/s, so keep the
+  // floor unchanged instead of forcing low-speed search turns to 120 mm/s.
   if (isPurePivot(left, right)) {
     leftMmps = leftMmps > 0 ? max(leftMmps, MIN_PIVOT_WHEEL_MMPS)
                             : min(leftMmps, -MIN_PIVOT_WHEEL_MMPS);
