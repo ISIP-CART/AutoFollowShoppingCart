@@ -40,17 +40,19 @@ static const int AT8236_ENCODER_LINES = 11;
 static const float AT8236_WHEEL_DIAMETER_MM = 80.0f;
 static const int AT8236_DEADZONE = 1600;
 
-// The existing OpenBot cart-follow output tops out at logical 14.  Raise that
-// operating point to 240 mm/s, while reserving logical 15..21 for a staged
-// higher-speed interface.  Logical 21 reaches the hard 360 mm/s limit;
-// larger legacy inputs remain protocol-compatible but cannot exceed it.
-// The original landed tests proved the lower ranges, so 240/310/360 must be admitted
-// progressively with raised-wheel, braking and open-floor validation.
+// Keep the existing OpenBot cart-follow range (logical 0..14) unchanged, with
+// logical 14 at 240 mm/s.  Extend logical 15..21 as a second, steeper range for
+// the new speed+direction controller; logical 21 reaches 600 mm/s.  This keeps
+// the legacy Android behaviour stable while making a supervised indoor-follow
+// range available.  Larger inputs remain compatible but saturate at the cap.
 static const int PROTOCOL_INPUT_LIMIT = 255;
+static const int PROTOCOL_LEGACY_FULL_SPEED_INPUT = 14;
+static const int LEGACY_FULL_SPEED_MMPS = 240;
 static const int PROTOCOL_FULL_SPEED_INPUT = 21;
-static const int MAX_WHEEL_SPEED_MMPS = 360;
+static const int MAX_WHEEL_SPEED_MMPS = 600;
 static const int MIN_MOVING_WHEEL_MMPS = 40;
 static const int MIN_PIVOT_WHEEL_MMPS = 80;
+static const int MAX_COUNTER_ROTATION_MMPS = 240;
 static const int CONTROL_RAMP_STEP_MMPS = 20;
 static const unsigned long CONTROL_PERIOD_MS = 50;
 
@@ -67,8 +69,8 @@ static const unsigned long IDLE_ZERO_REFRESH_MS = 200;
 static const float ZERO_SPEED_MMPS = 30.0f;
 static const float BRAKE_FALLBACK_SPEED_MMPS = 120.0f;
 static const float OVERSPEED_MIN_MMPS = 300.0f;
-static const float OVERSPEED_RATIO = 3.0f;
-static const float OVERSPEED_ABSOLUTE_MMPS = 500.0f;
+static const float OVERSPEED_RATIO = 1.5f;
+static const float OVERSPEED_ABSOLUTE_MMPS = 750.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
 
 static const size_t MAX_PROTOCOL_LINE_LEN = 80;
@@ -350,15 +352,31 @@ bool parseFourLongs(const String &payload, long values[4]) {
 int scaleLogicalSide(int logical) {
   logical = constrain(logical, -PROTOCOL_INPUT_LIMIT, PROTOCOL_INPUT_LIMIT);
   if (logical == 0) return 0;
-  long magnitude = (long)abs(logical) * MAX_WHEEL_SPEED_MMPS;
-  int scaled = (int)((magnitude + PROTOCOL_FULL_SPEED_INPUT / 2) /
-                     PROTOCOL_FULL_SPEED_INPUT);
+  int inputMagnitude = abs(logical);
+  int scaled = 0;
+  if (inputMagnitude <= PROTOCOL_LEGACY_FULL_SPEED_INPUT) {
+    long numerator = (long)inputMagnitude * LEGACY_FULL_SPEED_MMPS;
+    scaled = (int)((numerator + PROTOCOL_LEGACY_FULL_SPEED_INPUT / 2) /
+                   PROTOCOL_LEGACY_FULL_SPEED_INPUT);
+  } else {
+    const int inputSpan = PROTOCOL_FULL_SPEED_INPUT -
+                          PROTOCOL_LEGACY_FULL_SPEED_INPUT;
+    const int speedSpan = MAX_WHEEL_SPEED_MMPS - LEGACY_FULL_SPEED_MMPS;
+    long numerator = (long)(inputMagnitude -
+                            PROTOCOL_LEGACY_FULL_SPEED_INPUT) * speedSpan;
+    scaled = LEGACY_FULL_SPEED_MMPS +
+             (int)((numerator + inputSpan / 2) / inputSpan);
+  }
   scaled = constrain(scaled, MIN_MOVING_WHEEL_MMPS, MAX_WHEEL_SPEED_MMPS);
   return logical > 0 ? scaled : -scaled;
 }
 
 bool isPurePivot(int left, int right) {
   return left != 0 && right != 0 && left == -right;
+}
+
+bool isCounterRotation(int left, int right) {
+  return left != 0 && right != 0 && ((left > 0) != (right > 0));
 }
 
 void calculateWheelTargets(int left, int right, int result[4]) {
@@ -373,6 +391,16 @@ void calculateWheelTargets(int left, int right, int result[4]) {
                             : min(leftMmps, -MIN_PIVOT_WHEEL_MMPS);
     rightMmps = rightMmps > 0 ? max(rightMmps, MIN_PIVOT_WHEEL_MMPS)
                               : min(rightMmps, -MIN_PIVOT_WHEEL_MMPS);
+  }
+
+  // The 600 mm/s extension is for forward/reverse following and same-direction
+  // differential arcs.  Any command that counter-rotates the two sides remains
+  // bounded to the previously exposed 240 mm/s rotational envelope.
+  if (isCounterRotation(left, right)) {
+    leftMmps = constrain(leftMmps, -MAX_COUNTER_ROTATION_MMPS,
+                         MAX_COUNTER_ROTATION_MMPS);
+    rightMmps = constrain(rightMmps, -MAX_COUNTER_ROTATION_MMPS,
+                          MAX_COUNTER_ROTATION_MMPS);
   }
 
   result[0] = FORWARD_SIGN[0] * leftMmps;   // M1 left rear
@@ -450,6 +478,9 @@ void printStatus() {
   Serial.print(",motion_age_ms=");
   Serial.print(lastMotionCommandMs ? (long)(millis() - lastMotionCommandMs) : -1);
   Serial.print(",accepted_motion_count="); Serial.print(acceptedMotionCount);
+  Serial.print(",speed_legacy_input=");
+  Serial.print(PROTOCOL_LEGACY_FULL_SPEED_INPUT);
+  Serial.print(",speed_legacy_mmps="); Serial.print(LEGACY_FULL_SPEED_MMPS);
   Serial.print(",speed_full_input="); Serial.print(PROTOCOL_FULL_SPEED_INPUT);
   Serial.print(",speed_cap_mmps="); Serial.print(MAX_WHEEL_SPEED_MMPS);
   Serial.print(",logical="); Serial.print(logicalLeft); Serial.print(',');
