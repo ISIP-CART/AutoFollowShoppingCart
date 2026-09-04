@@ -61,9 +61,12 @@ static const unsigned long SENSOR_STALE_MS = 200;
 static const unsigned long MIN_SONAR_REPORT_MS = 50;
 static const unsigned long MAX_SONAR_REPORT_MS = 1000;
 
-// These thresholds implement the current local-safety proposal without adding
-// the un-frozen V2 d/g/a/m wire messages.  A cleared risk never replays an old
-// motion command: Android must send a fresh c command.
+// Range risks remain calculated and logged, but the current integration phase
+// is observation-only: sensor state must not reject commands or brake motion.
+// Set this true only after the range-safety policy and hardware tests are
+// explicitly approved.  REQUIRE_RANGE_SENSORS_FOR_MOTION is retained as the
+// future policy used when gating is enabled.
+static const bool RANGE_MOTION_GATING_ENABLED = false;
 static const int CENTER_STOP_MM = 300;
 static const int CENTER_CLEAR_MM = 400;
 static const int CORNER_STOP_MM = 200;
@@ -602,6 +605,8 @@ void serviceRangeSensors() {
 }
 
 const char *motionRangeBlockReason(int left, int right) {
+  if (!RANGE_MOTION_GATING_ENABLED) return NULL;
+
   bool forward = left + right > 0;
   bool turningLeft = right > left;
   bool turningRight = left > right;
@@ -660,6 +665,7 @@ void serviceRangeDiagnostics() {
       now - lastRangeDiagnosticMs < DIAGNOSTIC_SAMPLE_MS) return;
   lastRangeDiagnosticMs = now;
   Serial.print("RANGE,ms="); Serial.print(now);
+  Serial.print(",gating="); Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
   Serial.print(",left_mm="); Serial.print(leftRange.filteredMm);
   Serial.print(",left_status="); Serial.print(rangeStatusName(effectiveRangeStatus(leftRange)));
   Serial.print(",left_age_ms="); Serial.print(rangeAgeMs(leftRange));
@@ -678,6 +684,7 @@ void serviceRangeDiagnostics() {
 }
 
 void serviceRangeMotionSafety() {
+  if (!RANGE_MOTION_GATING_ENABLED) return;
   if (systemState != MANUAL_ACTIVE) return;
   const char *reason = motionRangeBlockReason(logicalLeft, logicalRight);
   if (reason != NULL) beginBrake(reason);
@@ -901,6 +908,8 @@ void printStatus() {
   Serial.print(",speed_legacy_mmps="); Serial.print(LEGACY_FULL_SPEED_MMPS);
   Serial.print(",speed_full_input="); Serial.print(PROTOCOL_FULL_SPEED_INPUT);
   Serial.print(",speed_cap_mmps="); Serial.print(MAX_WHEEL_SPEED_MMPS);
+  Serial.print(",range_motion_gating=");
+  Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
   Serial.print(",logical="); Serial.print(logicalLeft); Serial.print(',');
   Serial.print(logicalRight);
   Serial.print(",target=");
@@ -1454,6 +1463,7 @@ void setup() {
   configureAT8236();
   setupBle();
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
+  Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
 }
 
 void loop() {

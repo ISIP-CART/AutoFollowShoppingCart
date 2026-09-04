@@ -46,7 +46,31 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertEqual(self.constant("CORNER_STOP_MM"), 200)
         self.assertEqual(self.constant("CORNER_CLEAR_MM"), 300)
         self.assertEqual(self.constant("RISK_CLEAR_VALID_SAMPLES"), 3)
+        self.assertIn("RANGE_MOTION_GATING_ENABLED = false", self.source)
         self.assertIn("REQUIRE_RANGE_SENSORS_FOR_MOTION = true", self.source)
+
+    def test_sensor_motion_gating_is_bypassed_at_both_entries(self):
+        block_reason = re.search(
+            r"const char \*motionRangeBlockReason\(.*?\n\}",
+            self.source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(block_reason)
+        self.assertRegex(
+            block_reason.group(0),
+            r"\{\s*if \(!RANGE_MOTION_GATING_ENABLED\) return NULL;",
+        )
+
+        active_safety = re.search(
+            r"void serviceRangeMotionSafety\(\) \{.*?\n\}",
+            self.source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(active_safety)
+        self.assertRegex(
+            active_safety.group(0),
+            r"\{\s*if \(!RANGE_MOTION_GATING_ENABLED\) return;",
+        )
 
     def test_v1_sonar_capability_is_wired_end_to_end(self):
         self.assertIn('sendLine(source, "fCART_AT8236:s:\\n")', self.source)
@@ -69,6 +93,36 @@ class FirmwareContractTest(unittest.TestCase):
         loop = loop_match.group(1)
         self.assertLess(loop.index("serviceRangeSensors();"), loop.index("serviceBleEvents();"))
         self.assertLess(loop.index("serviceRangeMotionSafety();"), loop.index("serviceActiveMotion();"))
+        self.assertIn("serviceLegacyRangeTelemetry();", loop)
+        self.assertIn("serviceRangeDiagnostics();", loop)
+
+    def test_non_range_safety_paths_remain_present(self):
+        required_fragments = (
+            'beginBrake("control_zero")',
+            'line.startsWith("!S")',
+            'beginBrake("link_timeout")',
+            'beginBrake("motion_timeout")',
+            'enterLatchedFault(DRIVER_ERROR',
+            'beginBrake("direct_reversal")',
+            'beginBrake("ble_disconnect")',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+    def test_range_observation_outputs_remain_present(self):
+        required_fragments = (
+            'line == "!D,1"',
+            'Serial.print("RANGE,ms=")',
+            'Serial.print(",left_status=")',
+            'Serial.print(",center_status=")',
+            'Serial.print(",right_status=")',
+            'Serial.print(",risk=")',
+            'Serial.print(",gating=")',
+            'Serial.print(",range_motion_gating=")',
+            'Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0")',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
 
     def test_recovery_drops_pre_stale_filter_history(self):
         self.assertIn("now - reading.lastValidMs > SENSOR_STALE_MS", self.source)
