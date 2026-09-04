@@ -845,3 +845,13 @@ Android 手机 / OpenBot App
 4. 目标在场时干扰者穿越或靠近。
 
 测试时只在需要导出数据时打开“记录日志”。导出后用 `tools/reid_pc_test/analyze_cartfollow_diagnostics_v1.py --compare-roots old=...,new=...` 对比 `recovered_rate`、`mean_ms_to_follow`、`candidate_switch_penalty`、`belief_high_bbox_failed`、非目标转绿行数和 `hard_stop_count`。只有这些指标不恶化并且两个 blocker 明显下降后，才考虑进入极低速真实底盘联调。
+
+## 19.3 2026-09-04 传感器链路状态
+
+- ESP32 正式 BLE 固件已接入左右 VL53L1X 与中央 URM09-I²C，并实施方向相关的本地停车。
+- Android 使用兼容 OpenBot 的 V1 `s` 扩展接收三路有效最小距离；V1 无法区分读数来源。
+  实车发现最小值不足以支持方向级判断后，Android 已改为仅显示和记录测距，不再据此改变手动、
+  自动跟随或定向搜索命令。ESP32 固件门控尚未同步关闭，仍可能拒绝运动。
+- V2 `m/d/g/a` 仍为草案，当前不支持侧移。后退没有后侧传感器覆盖。
+- 固件 `c21` 已扩展到约 600 mm/s；自动页面保留该默认上限，但高速跟随必须逐档完成悬空和
+  空旷落地验证，不能视为当前课程原型已经安全通过的工作速度。
