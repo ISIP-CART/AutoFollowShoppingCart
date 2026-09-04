@@ -393,6 +393,12 @@ int medianHistory(const RangeReading &reading) {
 
 void recordValidRange(RangeReading &reading, int distanceMm, uint8_t deviceStatus) {
   unsigned long now = millis();
+  // Do not blend a newly recovered obstacle with pre-outage history.  The first
+  // valid sample after a stale gap must be able to stop the cart immediately.
+  if (reading.lastValidMs == 0 || now - reading.lastValidMs > SENSOR_STALE_MS) {
+    reading.historyCount = 0;
+    reading.historyIndex = 0;
+  }
   reading.present = true;
   reading.rawMm = distanceMm;
   reading.status = RANGE_VALID;

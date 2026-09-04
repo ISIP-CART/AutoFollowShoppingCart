@@ -70,6 +70,10 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertLess(loop.index("serviceRangeSensors();"), loop.index("serviceBleEvents();"))
         self.assertLess(loop.index("serviceRangeMotionSafety();"), loop.index("serviceActiveMotion();"))
 
+    def test_recovery_drops_pre_stale_filter_history(self):
+        self.assertIn("now - reading.lastValidMs > SENSOR_STALE_MS", self.source)
+        self.assertIn("reading.historyCount = 0", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
