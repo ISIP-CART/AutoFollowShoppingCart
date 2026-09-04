@@ -14,6 +14,7 @@
 - 上位机：本仓库 OpenBot Android 的 `RealCartFollowFragment`
 - 控制方式：Android 左右逻辑量 -> ESP32 四轮映射 -> AT8236 `$spd` mm/s 闭环
 - 当前只开放差速前进、后退、原地转向和弧线，不开放麦轮横移
+- 已集成中央 URM09-I²C 与左右 VL53L1X；传感器与本地停车必须先通过台架和架空联调
 - 阶段 N 载物测试保持暂停；先完成 BLE 空载联调
 
 ## 接线与 AT8236 参数
@@ -46,13 +47,47 @@
 
 沿用 OpenBot 文本协议，每行以 `\n` 结束：
 
-- `f`：回复 `fCART_AT8236:`；驱动遥测就绪后再回复 `r`
+- `f`：回复 `fCART_AT8236:s:`；`:s:` 使现有 Android 启用测距显示，驱动遥测就绪后再回复 `r`
 - `h750`：设置链路超时。Android 每 250 ms 发送一次
+- `s100`：设置当前连接的 V1 测距上报周期（50–1000 ms，`s0` 关闭）
+- `s<cm>`：固件按请求周期回传三路中“当前有效且未过期”的最小距离；无有效值时不伪造远距离
 - `c<left>,<right>`：控制，Android 实车页面每 100 ms 重发当前值
 - `c0,0`：普通停车，立即进入 `$spd:0` 主动制动
 - `!S,<seq>`：锁存急停，必须重启 ESP32 才能恢复
 - `!Q`：仅 USB，打印状态
 - `!D,1` / `!D,0`：仅 USB，开关诊断日志
+
+最新的 `购物车Android-ESP32通信协议V2草案.md` 仍标记为 `V2-DRAFT-0.1`，并明确
+要求冻结前不实现 `m/d/g/a`。本固件因此只实现已兼容的 V1 `s` 能力；三路独立
+距离、状态和 age 目前通过 USB `!Q` / `RANGE` 诊断查看。Android 页面上的 V1
+数值只用于观察，ESP32 本地状态与停车逻辑才是安全依据。
+
+## 三路测距与本地安全
+
+I²C 总线为 100 kHz，全部模块按 3.3 V 供电：
+
+| 位置 | 模块 | 接线 / 地址 | 有效范围（固件） |
+|---|---|---|---:|
+| 左前 | VL53L1X | SDA=21、SCL=22、XSHUT=25，启动后 `0x2A` | 40–1300 mm |
+| 中央 | URM09-I²C | SDA=21、SCL=22，`0x11` | 20–5000 mm |
+| 右前 | VL53L1X | SDA=21、SCL=22、XSHUT=26，启动后 `0x2B` | 40–1300 mm |
+
+两只 ToF 先同时 XSHUT 拉低，再逐只释放、初始化和改址。ToF 使用 Short 模式、
+33 ms timing budget、50 ms 连续测量；URM09 使用非阻塞的“触发—等待 100 ms—读取”
+状态机，触发周期 120 ms。三路均维护 3 点有效值中值、原始设备状态、最后有效时间；
+超过 200 ms 无有效更新视为不可用，不能当作前方空旷。
+
+本地运动门控如下：
+
+- 前进要求中央读数有效且新鲜；中央 `<=300 mm` 制动，`>400 mm` 连续 3 个有效样本后解除。
+- 左转要求左 ToF 有效且新鲜；左侧 `<=200 mm` 制动，`>300 mm` 连续 3 帧后解除；右转镜像处理。
+- 风险解除只允许之后收到的新 `c` 命令生效，不回放停车前目标。
+- 后退没有后侧传感器覆盖，不能据此宣称具有后向防撞能力。
+- `REQUIRE_RANGE_SENSORS_FOR_MOTION=true` 为默认安全配置；传感器缺失/过期时，相应方向命令返回 `!ERR,sensor_*_unavailable`。
+
+执行 `!D,1` 后，每 200 ms 输出一行 `RANGE`，包含三路 `*_mm`、`*_status`、
+`*_age_ms`、ToF 设备状态和 `risk`。`!Q` 也包含同类快照。完整验收步骤见
+[传感器集成测试方案](传感器集成测试方案.md)。
 
 ### 当前逻辑量到实车速度的映射
 
@@ -135,13 +170,23 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
 1. 先架空四轮，旁边保留可直接断开电机电源的人。
 2. Arduino IDE 打开本目录的 `.ino`。
 3. 开发板选择 `ESP32 Dev Module`，串口选择 ESP32 对应 COM 口。
-4. 使用 ESP32 Arduino Core 自带的 `BLEDevice`、`BLEServer`、`BLE2902`，无需另装
-   BLE 库。
+4. 使用 ESP32 Arduino Core 自带的 `BLEDevice`、`BLEServer`、`BLE2902`；另安装
+   **Pololu VL53L1X 1.3.1**（头文件 `VL53L1X.h`）。不要同时安装同名但 API 不兼容的库。
 5. 编译并上传，串口监视器设为 115200。
 6. 上电后应看到 boot 文本；发送 `!D,1` 和 `!Q`，等待
    `state=READY_STOP,driver_ready=1` 后才允许运动；本版 `!Q` 还应包含
    `speed_legacy_input=14,speed_legacy_mmps=240,speed_full_input=21,`
-   `speed_cap_mmps=600`，用于确认烧录的是本次提速版本。
+   `speed_cap_mmps=600`，并检查 `left_status/center_status/right_status`，用于确认
+   烧录的是本次提速与三路测距集成版本。
+
+无需 Arduino 工具链的静态契约检查可在仓库根目录执行：
+
+```bash
+python -m unittest firmware/esp32_at8236_velocity_ble/tests/test_firmware_contract.py
+```
+
+它检查引脚、地址、阈值、V1 `s` 链路、V2 禁止项和主循环安全调用顺序，但不能替代
+ESP32 实际编译、I²C 实物测距或停车距离测试。
 
 ## 分阶段验证步骤
 
