@@ -150,13 +150,17 @@ class FirmwareContractTest(unittest.TestCase):
             self.source,
         )
         self.assertIn(
-            'enterDriverFault("overspeed_m" + String(i + 1), false)',
+            'enterDriverFault("overspeed_absolute_m" + String(i + 1), false)',
+            self.source,
+        )
+        self.assertIn(
+            'enterDriverFault("overspeed_dynamic_m" + String(i + 1), false)',
             self.source,
         )
         self.assertIn("Hard faults and emergency stop must remain in disabled-PWM mode", self.source)
         self.assertIn("disablePwmOutput();", self.source)
 
-    def test_c14_captured_mspd_is_warning_not_false_hard_overspeed(self):
+    def test_c14_and_curve_captures_do_not_false_hard_overspeed(self):
         warning_ratio = self.float_constant("OVERSPEED_WARNING_RATIO")
         hard_ratio = self.float_constant("OVERSPEED_RATIO")
         minimum = self.float_constant("OVERSPEED_MIN_MMPS")
@@ -165,14 +169,34 @@ class FirmwareContractTest(unittest.TestCase):
         def limit(target: float, ratio: float) -> float:
             return min(absolute, max(minimum, abs(target) * ratio))
 
-        captured_mspd = 437.92
         self.assertEqual(warning_ratio, 1.5)
-        self.assertEqual(hard_ratio, 3.0)
-        self.assertGreater(captured_mspd, limit(240, warning_ratio))
-        self.assertLess(captured_mspd, limit(240, hard_ratio))
-        self.assertLess(captured_mspd, limit(223, hard_ratio))
+        self.assertEqual(hard_ratio, 4.0)
+        self.assertGreater(437.92, limit(240, warning_ratio))
+        self.assertLess(437.92, limit(240, hard_ratio))
+        self.assertLess(437.92, limit(223, hard_ratio))
+        self.assertGreater(533.12, limit(154, 3.0))
+        self.assertLess(533.12, limit(154, hard_ratio))
         self.assertEqual(limit(600, hard_ratio), 750.0)
         self.assertIn('diagnostic("overspeed_warning"', self.source)
+
+    def test_curve_target_reduction_waits_for_command_and_feedback_settle(self):
+        self.assertEqual(self.constant("OVERSPEED_TARGET_SETTLE_MS"), 500)
+        required_fragments = (
+            "speedReference = max(absFloat((float)currentWheelMmps[i])",
+            "currentWheelMmps[i] == targetWheelMmps[i]",
+            "now - targetSettledSinceMs[i] >= OVERSPEED_TARGET_SETTLE_MS",
+            "dynamicCheckSettled && absFloat(measured) > limit",
+            "if (targetWheelMmps[i] != requested[i])",
+            "targetSettledSinceMs[i] = 0",
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+        absolute_check = self.source.index(
+            "absFloat(measured) > OVERSPEED_ABSOLUTE_MMPS"
+        )
+        settled_check = self.source.index("bool dynamicCheckSettled")
+        self.assertLess(absolute_check, settled_check)
 
     def test_fault_context_is_persistent_and_queryable(self):
         required_fragments = (
@@ -183,8 +207,9 @@ class FirmwareContractTest(unittest.TestCase):
             'Serial.print(",driver_recovery_active=")',
             'Serial.print(",fault_mspd_age_ms=")',
             'Serial.print(",fault_target=")',
+            'Serial.print("fault_current=")',
             'Serial.print("fault_mspd=")',
-            'Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00")',
+            'Serial.println("FAULT_RECOVERY,version=3,transient_auto_recover=1,overspeed_hard_ratio=4.00,overspeed_absolute_mmps=750")',
         )
         for fragment in required_fragments:
             self.assertIn(fragment, self.source)

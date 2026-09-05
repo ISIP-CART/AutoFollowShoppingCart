@@ -117,14 +117,15 @@ static const unsigned long LATCHED_ERROR_REPORT_INTERVAL_MS = 500;
 static const float ZERO_SPEED_MMPS = 30.0f;
 static const float BRAKE_FALLBACK_SPEED_MMPS = 120.0f;
 static const float OVERSPEED_MIN_MMPS = 300.0f;
-// Existing AT8236 captures show about 419..476 MSPD at the c14 operating point.
-// The validation firmware therefore uses 3x as the hard runaway threshold.
-// The earlier 1.5x BLE threshold made the normal c14 response exceed 360 mm/s
-// and caused false permanent overspeed faults. Keep 1.5x as diagnostics only.
+// Existing AT8236 captures show about 419..590 MSPD at the c14 operating point.
+// A c14->c9 curve transition also showed 533 MSPD while the new inner-wheel
+// target was 154 mm/s.  Keep 1.5x as diagnostics, use 4x for the settled
+// dynamic check, and retain an independent 750 mm/s absolute hard stop.
 static const float OVERSPEED_WARNING_RATIO = 1.5f;
-static const float OVERSPEED_RATIO = 3.0f;
+static const float OVERSPEED_RATIO = 4.0f;
 static const float OVERSPEED_ABSOLUTE_MMPS = 750.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
+static const unsigned long OVERSPEED_TARGET_SETTLE_MS = 500;
 
 static const size_t MAX_PROTOCOL_LINE_LEN = 80;
 static const size_t MAX_MOTOR_FRAME_LEN = 160;
@@ -236,12 +237,15 @@ bool lastFaultRecoverable = false;
 bool brakePidWarningReported = false;
 String lastFaultReason = "none";
 int lastFaultTargetMmps[4] = {0, 0, 0, 0};
+int lastFaultCurrentMmps[4] = {0, 0, 0, 0};
 float lastFaultMspd[4] = {0, 0, 0, 0};
 unsigned long lastLatchedErrorReportMs[3] = {0, 0, 0};
 unsigned long feedbackMismatchSinceMs[4] = {0, 0, 0, 0};
 unsigned long overspeedSinceMs[4] = {0, 0, 0, 0};
+unsigned long absoluteOverspeedSinceMs[4] = {0, 0, 0, 0};
 unsigned long overspeedWarningSinceMs[4] = {0, 0, 0, 0};
 bool overspeedWarningReported[4] = {false, false, false, false};
+unsigned long targetSettledSinceMs[4] = {0, 0, 0, 0};
 unsigned long sonarReportIntervalMs[3] = {0, 0, 0};
 unsigned long lastSonarReportMs[3] = {0, 0, 0};
 unsigned long urm09TriggerMs = 0;
@@ -347,8 +351,10 @@ void clearMotionVectors() {
     currentWheelMmps[i] = 0;
     feedbackMismatchSinceMs[i] = 0;
     overspeedSinceMs[i] = 0;
+    absoluteOverspeedSinceMs[i] = 0;
     overspeedWarningSinceMs[i] = 0;
     overspeedWarningReported[i] = false;
+    targetSettledSinceMs[i] = 0;
   }
 }
 
@@ -748,6 +754,7 @@ void recordFaultContext(const String &reason, bool recoverable) {
   lastFaultMspdAgeMs = lastMspdMs == 0 ? -1L : (long)(now - lastMspdMs);
   for (int i = 0; i < 4; ++i) {
     lastFaultTargetMmps[i] = targetWheelMmps[i];
+    lastFaultCurrentMmps[i] = currentWheelMmps[i];
     lastFaultMspd[i] = latestMspd[i];
   }
 }
@@ -926,6 +933,7 @@ bool feedbackSafe() {
     if (targetWheelMmps[i] == 0) {
       feedbackMismatchSinceMs[i] = 0;
       overspeedSinceMs[i] = 0;
+      absoluteOverspeedSinceMs[i] = 0;
       overspeedWarningSinceMs[i] = 0;
       overspeedWarningReported[i] = false;
       continue;
@@ -944,10 +952,12 @@ bool feedbackSafe() {
       feedbackMismatchSinceMs[i] = 0;
     }
 
+    float speedReference = max(absFloat((float)currentWheelMmps[i]),
+                               absFloat((float)targetWheelMmps[i]));
     float warningLimit = min(
       OVERSPEED_ABSOLUTE_MMPS,
       max(OVERSPEED_MIN_MMPS,
-          absFloat((float)targetWheelMmps[i]) * OVERSPEED_WARNING_RATIO));
+          speedReference * OVERSPEED_WARNING_RATIO));
     if (absFloat(measured) > warningLimit) {
       if (overspeedWarningSinceMs[i] == 0) overspeedWarningSinceMs[i] = now;
       if (!overspeedWarningReported[i] &&
@@ -956,22 +966,40 @@ bool feedbackSafe() {
         diagnostic("overspeed_warning",
                    "wheel=" + String(i + 1) +
                    ",target=" + String(targetWheelMmps[i]) +
+                   ",current=" + String(currentWheelMmps[i]) +
                    ",mspd=" + String(measured, 2) +
-                   ",limit=" + String(warningLimit, 2));
+                   ",limit=" + String(warningLimit, 2) +
+                   ",settled=" + String(targetSettledSinceMs[i] != 0 ? 1 : 0));
       }
     } else {
       overspeedWarningSinceMs[i] = 0;
       overspeedWarningReported[i] = false;
     }
 
+    // The absolute cap is always armed, including while a wheel is ramping or
+    // the AT8236 loop is settling after an inner-wheel target reduction.
+    if (absFloat(measured) > OVERSPEED_ABSOLUTE_MMPS) {
+      if (absoluteOverspeedSinceMs[i] == 0) absoluteOverspeedSinceMs[i] = now;
+      if (now - absoluteOverspeedSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
+        enterDriverFault("overspeed_absolute_m" + String(i + 1), false);
+        return false;
+      }
+    } else {
+      absoluteOverspeedSinceMs[i] = 0;
+    }
+
+    bool dynamicCheckSettled =
+      currentWheelMmps[i] == targetWheelMmps[i] &&
+      targetSettledSinceMs[i] != 0 &&
+      now - targetSettledSinceMs[i] >= OVERSPEED_TARGET_SETTLE_MS;
     float limit = min(
       OVERSPEED_ABSOLUTE_MMPS,
       max(OVERSPEED_MIN_MMPS,
-          absFloat((float)targetWheelMmps[i]) * OVERSPEED_RATIO));
-    if (absFloat(measured) > limit) {
+          speedReference * OVERSPEED_RATIO));
+    if (dynamicCheckSettled && absFloat(measured) > limit) {
       if (overspeedSinceMs[i] == 0) overspeedSinceMs[i] = now;
       if (now - overspeedSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
-        enterDriverFault("overspeed_m" + String(i + 1), false);
+        enterDriverFault("overspeed_dynamic_m" + String(i + 1), false);
         return false;
       }
     } else {
@@ -1002,6 +1030,8 @@ void printStatus() {
   Serial.print(",overspeed_hard_ratio="); Serial.print(OVERSPEED_RATIO, 2);
   Serial.print(",overspeed_absolute_mmps=");
   Serial.print(OVERSPEED_ABSOLUTE_MMPS, 2);
+  Serial.print(",overspeed_settle_ms=");
+  Serial.print(OVERSPEED_TARGET_SETTLE_MS);
   Serial.print(",range_motion_gating=");
   Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
   Serial.print(",last_fault_reason="); Serial.print(lastFaultReason);
@@ -1015,6 +1045,11 @@ void printStatus() {
   Serial.print(",fault_target=");
   for (int i = 0; i < 4; ++i) {
     Serial.print(lastFaultTargetMmps[i]);
+    Serial.print(i == 3 ? ',' : ':');
+  }
+  Serial.print("fault_current=");
+  for (int i = 0; i < 4; ++i) {
+    Serial.print(lastFaultCurrentMmps[i]);
     Serial.print(i == 3 ? ',' : ':');
   }
   Serial.print("fault_mspd=");
@@ -1130,7 +1165,13 @@ void handleMotionCommand(ControlSource source, const String &line) {
   lastMotionCommandMs = now;
   logicalLeft = left;
   logicalRight = right;
-  for (int i = 0; i < 4; ++i) targetWheelMmps[i] = requested[i];
+  for (int i = 0; i < 4; ++i) {
+    if (targetWheelMmps[i] != requested[i]) {
+      targetWheelMmps[i] = requested[i];
+      targetSettledSinceMs[i] = 0;
+      overspeedSinceMs[i] = 0;
+    }
+  }
   acceptedMotionCount++;
   setState(MANUAL_ACTIVE);
   diagnostic("motion_accept",
@@ -1500,9 +1541,17 @@ void serviceActiveMotion() {
   if (now - lastControlUpdateMs < CONTROL_PERIOD_MS) return;
   lastControlUpdateMs = now;
   for (int i = 0; i < 4; ++i) {
+    int previous = currentWheelMmps[i];
     currentWheelMmps[i] = moveToward(currentWheelMmps[i],
                                      targetWheelMmps[i],
                                      CONTROL_RAMP_STEP_MMPS);
+    if (currentWheelMmps[i] == targetWheelMmps[i]) {
+      if (previous != targetWheelMmps[i] || targetSettledSinceMs[i] == 0) {
+        targetSettledSinceMs[i] = now;
+      }
+    } else {
+      targetSettledSinceMs[i] = 0;
+    }
   }
   sendSpeedVector(currentWheelMmps);
 
@@ -1631,7 +1680,7 @@ void setup() {
   setupBle();
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
   Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
-  Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00");
+  Serial.println("FAULT_RECOVERY,version=3,transient_auto_recover=1,overspeed_hard_ratio=4.00,overspeed_absolute_mmps=750");
 }
 
 void loop() {
