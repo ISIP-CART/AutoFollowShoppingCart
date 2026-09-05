@@ -63,6 +63,8 @@ static const uint16_t URM09_MAX_VALID_MM = 5000;
 static const unsigned long SENSOR_STALE_MS = 200;
 static const unsigned long MIN_SONAR_REPORT_MS = 50;
 static const unsigned long MAX_SONAR_REPORT_MS = 1000;
+static const unsigned long MIN_R3_REPORT_MS = 100;
+static const unsigned long MAX_R3_REPORT_MS = 1000;
 
 // Range risks remain calculated and logged, but the current integration phase
 // is observation-only: sensor state must not reject commands or brake motion.
@@ -127,9 +129,15 @@ static const float OVERSPEED_ABSOLUTE_MMPS = 750.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
 static const unsigned long OVERSPEED_TARGET_SETTLE_MS = 500;
 
-static const size_t MAX_PROTOCOL_LINE_LEN = 80;
+// R3-V1 limits complete protocol lines to 128 bytes including LF.  The input
+// buffer stores the at-most 127 bytes before LF plus a local NUL terminator.
+static const size_t MAX_PROTOCOL_LINE_LEN = 127;
 static const size_t MAX_MOTOR_FRAME_LEN = 160;
 static const size_t BLE_RX_QUEUE_LEN = 384;
+static const size_t BLE_TX_CHUNK_LEN = 20;
+static const size_t BLE_TX_MAX_LINE_LEN = 128;
+static const size_t BLE_TX_PRIORITY_QUEUE_LEN = 8;
+static const unsigned long BLE_TX_CHUNK_INTERVAL_MS = 2;
 static const unsigned long DIAGNOSTIC_SAMPLE_MS = 200;
 
 // Physical wheel placement:
@@ -198,6 +206,16 @@ QueueHandle_t bleRxQueue = NULL;
 VL53L1X leftTof;
 VL53L1X rightTof;
 
+String bleTxPriorityQueue[BLE_TX_PRIORITY_QUEUE_LEN];
+size_t bleTxPriorityHead = 0;
+size_t bleTxPriorityCount = 0;
+String bleTxActiveLine;
+size_t bleTxActiveOffset = 0;
+String bleTxPendingLegacyTelemetry;
+String bleTxPendingR3Telemetry;
+bool bleTxPreferR3 = true;
+unsigned long lastBleTxChunkMs = 0;
+
 volatile bool bleClientConnected = false;
 volatile bool bleConnectPending = false;
 volatile bool bleAdvertisingNeedsRestart = false;
@@ -248,6 +266,9 @@ bool overspeedWarningReported[4] = {false, false, false, false};
 unsigned long targetSettledSinceMs[4] = {0, 0, 0, 0};
 unsigned long sonarReportIntervalMs[3] = {0, 0, 0};
 unsigned long lastSonarReportMs[3] = {0, 0, 0};
+unsigned long r3ReportIntervalMs[3] = {0, 0, 0};
+unsigned long lastR3ReportMs[3] = {0, 0, 0};
+uint16_t r3Sequence[3] = {0, 0, 0};
 unsigned long urm09TriggerMs = 0;
 bool urm09WaitingForResult = false;
 bool centerRiskLatched = false;
@@ -364,15 +385,110 @@ void releaseOwner() {
   lastMotionCommandMs = 0;
 }
 
-void sendToBle(const String &line) {
-  if (!bleClientConnected || txCharacteristic == NULL) return;
-  txCharacteristic->setValue(line.c_str());
-  txCharacteristic->notify();
+void clearBleTxState() {
+  for (size_t i = 0; i < BLE_TX_PRIORITY_QUEUE_LEN; ++i) {
+    bleTxPriorityQueue[i] = "";
+  }
+  bleTxPriorityHead = 0;
+  bleTxPriorityCount = 0;
+  bleTxActiveLine = "";
+  bleTxActiveOffset = 0;
+  bleTxPendingLegacyTelemetry = "";
+  bleTxPendingR3Telemetry = "";
+  bleTxPreferR3 = true;
+  lastBleTxChunkMs = 0;
+}
+
+bool validBleTxLine(const String &line) {
+  return line.length() > 0 && line.length() <= BLE_TX_MAX_LINE_LEN &&
+         line.charAt(line.length() - 1) == '\n';
+}
+
+void enqueueBlePriorityLine(const String &line) {
+  if (!bleClientConnected || !validBleTxLine(line)) return;
+  if (bleTxPriorityCount == BLE_TX_PRIORITY_QUEUE_LEN) {
+    bleTxPriorityQueue[bleTxPriorityHead] = "";
+    bleTxPriorityHead = (bleTxPriorityHead + 1) % BLE_TX_PRIORITY_QUEUE_LEN;
+    bleTxPriorityCount--;
+  }
+  size_t tail = (bleTxPriorityHead + bleTxPriorityCount) %
+                BLE_TX_PRIORITY_QUEUE_LEN;
+  bleTxPriorityQueue[tail] = line;
+  bleTxPriorityCount++;
+}
+
+void enqueueBleTelemetryLine(const String &line) {
+  if (!bleClientConnected || !validBleTxLine(line)) return;
+  // Telemetry is latest-wins.  An active line is always completed first, but
+  // an older line that has not started is replaced instead of accumulating.
+  bleTxPendingLegacyTelemetry = line;
+}
+
+void enqueueBleR3TelemetryLine(const String &line) {
+  if (!bleClientConnected || !validBleTxLine(line)) return;
+  bleTxPendingR3Telemetry = line;
+}
+
+void cancelPendingR3Telemetry() {
+  bleTxPendingR3Telemetry = "";
+}
+
+void sendR3Line(ControlSource source, const String &line) {
+  if (source == SOURCE_BLE) enqueueBleR3TelemetryLine(line);
+  else if (source == SOURCE_USB) Serial.print(line);
 }
 
 void sendLine(ControlSource source, const String &line) {
-  if (source == SOURCE_BLE) sendToBle(line);
+  if (source == SOURCE_BLE) {
+    enqueueBlePriorityLine(line);
+  } else if (source == SOURCE_USB) {
+    Serial.print(line);
+  }
+}
+
+void sendLegacyTelemetryLine(ControlSource source, const String &line) {
+  if (source == SOURCE_BLE) enqueueBleTelemetryLine(line);
   else if (source == SOURCE_USB) Serial.print(line);
+}
+
+void serviceBleTx() {
+  if (!bleClientConnected || txCharacteristic == NULL) return;
+
+  if (bleTxActiveLine.length() == 0) {
+    if (bleTxPriorityCount > 0) {
+      bleTxActiveLine = bleTxPriorityQueue[bleTxPriorityHead];
+      bleTxPriorityQueue[bleTxPriorityHead] = "";
+      bleTxPriorityHead = (bleTxPriorityHead + 1) % BLE_TX_PRIORITY_QUEUE_LEN;
+      bleTxPriorityCount--;
+    } else if (bleTxPendingR3Telemetry.length() > 0 &&
+               (bleTxPreferR3 || bleTxPendingLegacyTelemetry.length() == 0)) {
+      bleTxActiveLine = bleTxPendingR3Telemetry;
+      bleTxPendingR3Telemetry = "";
+      bleTxPreferR3 = false;
+    } else if (bleTxPendingLegacyTelemetry.length() > 0) {
+      bleTxActiveLine = bleTxPendingLegacyTelemetry;
+      bleTxPendingLegacyTelemetry = "";
+      bleTxPreferR3 = true;
+    }
+    bleTxActiveOffset = 0;
+  }
+
+  if (bleTxActiveLine.length() == 0) return;
+  unsigned long now = millis();
+  if (lastBleTxChunkMs != 0 &&
+      now - lastBleTxChunkMs < BLE_TX_CHUNK_INTERVAL_MS) return;
+  lastBleTxChunkMs = now;
+  size_t remaining = bleTxActiveLine.length() - bleTxActiveOffset;
+  size_t chunkLength = min(remaining, BLE_TX_CHUNK_LEN);
+  const uint8_t *chunk = reinterpret_cast<const uint8_t *>(
+    bleTxActiveLine.c_str() + bleTxActiveOffset);
+  txCharacteristic->setValue(const_cast<uint8_t *>(chunk), chunkLength);
+  txCharacteristic->notify();
+  bleTxActiveOffset += chunkLength;
+  if (bleTxActiveOffset >= bleTxActiveLine.length()) {
+    bleTxActiveLine = "";
+    bleTxActiveOffset = 0;
+  }
 }
 
 void reportError(ControlSource source, const String &reason) {
@@ -685,7 +801,71 @@ void serviceLegacyRangeTelemetry() {
     unsigned long interval = sonarReportIntervalMs[sourceValue];
     if (interval == 0 || now - lastSonarReportMs[sourceValue] < interval) continue;
     lastSonarReportMs[sourceValue] = now;
-    sendLine(source, "s" + String((minimumMm + 5) / 10) + "\n");
+    sendLegacyTelemetryLine(source,
+                            "s" + String((minimumMm + 5) / 10) + "\n");
+  }
+}
+
+RangeStatus r3RangeStatus(const RangeReading &reading, uint32_t emitMs) {
+  if (!reading.present) return RANGE_NOT_PRESENT;
+  // Explicit acquisition errors describe the newest sample and must not be
+  // hidden behind an older valid value becoming stale.
+  if (reading.status == RANGE_INVALID || reading.status == SIGNAL_INVALID ||
+      reading.status == RANGE_BUS_ERROR) {
+    return reading.status;
+  }
+  if (reading.lastValidMs == 0 || emitMs - reading.lastValidMs > SENSOR_STALE_MS) {
+    return RANGE_STALE;
+  }
+  return reading.status == RANGE_VALID ? RANGE_VALID : RANGE_STALE;
+}
+
+uint16_t r3RangeAgeMs(const RangeReading &reading, uint32_t emitMs) {
+  if (reading.lastValidMs == 0) return UINT16_MAX;
+  unsigned long age = emitMs - reading.lastValidMs;
+  return age > UINT16_MAX ? UINT16_MAX : (uint16_t)age;
+}
+
+void appendR3Reading(String &line, const RangeReading &reading,
+                     uint32_t emitMs) {
+  RangeStatus status = r3RangeStatus(reading, emitMs);
+  int distanceMm = status == RANGE_VALID && reading.filteredMm >= 0 &&
+                   reading.filteredMm <= (int)UINT16_MAX
+                     ? reading.filteredMm : -1;
+  line += ',';
+  line += String(distanceMm);
+  line += ',';
+  line += String((int)status);
+  line += ',';
+  line += String(r3RangeAgeMs(reading, emitMs));
+}
+
+String makeR3Snapshot(uint16_t sequence, uint32_t emitMs) {
+  String line;
+  line.reserve(BLE_TX_MAX_LINE_LEN);
+  line = "!R3D,";
+  line += String(sequence);
+  line += ',';
+  line += String(emitMs);
+  appendR3Reading(line, leftRange, emitMs);
+  appendR3Reading(line, centerRange, emitMs);
+  appendR3Reading(line, rightRange, emitMs);
+  line += '\n';
+  return line;
+}
+
+void serviceR3Telemetry() {
+  uint32_t now = millis();
+  for (int sourceValue = SOURCE_BLE; sourceValue <= SOURCE_USB; ++sourceValue) {
+    ControlSource source = (ControlSource)sourceValue;
+    if (source == SOURCE_BLE && !bleClientConnected) continue;
+    unsigned long interval = r3ReportIntervalMs[sourceValue];
+    if (interval == 0) continue;
+    if (lastR3ReportMs[sourceValue] != 0 &&
+        now - lastR3ReportMs[sourceValue] < interval) continue;
+    lastR3ReportMs[sourceValue] = now;
+    uint16_t sequence = r3Sequence[sourceValue]++;
+    sendR3Line(source, makeR3Snapshot(sequence, now));
   }
 }
 
@@ -1079,6 +1259,18 @@ void printStatus() {
   }
   Serial.print(",mspd_age_ms=");
   Serial.print(lastMspdMs ? (long)(millis() - lastMspdMs) : -1);
+  Serial.print(",r3_ble_period_ms=");
+  Serial.print(r3ReportIntervalMs[SOURCE_BLE]);
+  Serial.print(",r3_ble_next_seq=");
+  Serial.print(r3Sequence[SOURCE_BLE]);
+  Serial.print(",r3_usb_period_ms=");
+  Serial.print(r3ReportIntervalMs[SOURCE_USB]);
+  Serial.print(",r3_usb_next_seq=");
+  Serial.print(r3Sequence[SOURCE_USB]);
+  Serial.print(",ble_tx_priority_pending=");
+  Serial.print(bleTxPriorityCount);
+  Serial.print(",ble_tx_r3_pending=");
+  Serial.print(bleTxPendingR3Telemetry.length() > 0 ? 1 : 0);
   Serial.print(",left_mm="); Serial.print(leftRange.filteredMm);
   Serial.print(",left_status="); Serial.print(rangeStatusName(effectiveRangeStatus(leftRange)));
   Serial.print(",left_age_ms="); Serial.print(rangeAgeMs(leftRange));
@@ -1212,8 +1404,31 @@ void handleSonarFrequency(ControlSource source, const String &line) {
   lastSonarReportMs[(int)source] = 0;
 }
 
+void handleR3Config(ControlSource source, const String &line) {
+  String parts[2];
+  long requested = 0;
+  if (splitCsv(line, parts, 2) != 2 || parts[0] != "!R3") {
+    reportError(source, "bad_r3_config");
+    return;
+  }
+  parts[1].trim();
+  if (!parseLongStrict(parts[1], requested) ||
+      (requested != 0 &&
+       (requested < (long)MIN_R3_REPORT_MS ||
+        requested > (long)MAX_R3_REPORT_MS))) {
+    reportError(source, "bad_r3_config");
+    return;
+  }
+
+  int index = (int)source;
+  r3ReportIntervalMs[index] = (unsigned long)requested;
+  lastR3ReportMs[index] = 0;
+  if (source == SOURCE_BLE && requested == 0) cancelPendingR3Telemetry();
+  sendLine(source, "!R3,OK," + String(requested) + "\n");
+}
+
 void handleFeatureQuery(ControlSource source) {
-  sendLine(source, "fCART_AT8236:s:\n");
+  sendLine(source, "fCART_AT8236:s:r3v1:\n");
   if (at8236Ready && !isLatchedState()) {
     sendLine(source, "r\n");
   } else if (source == SOURCE_BLE) {
@@ -1269,6 +1484,8 @@ void processCommand(ControlSource source, String line) {
     else reportError(source, "usb_only");
   } else if (line.startsWith("!D,")) {
     handleDiagnostics(source, line);
+  } else if (line.startsWith("!R3")) {
+    handleR3Config(source, line);
   } else if (line.startsWith("!S")) {
     handleEmergency(source, line);
   } else if (line.charAt(0) == 'c') {
@@ -1446,6 +1663,10 @@ void serviceBleEvents() {
     bleDisconnectPending = false;
     sonarReportIntervalMs[SOURCE_BLE] = 0;
     lastSonarReportMs[SOURCE_BLE] = 0;
+    r3ReportIntervalMs[SOURCE_BLE] = 0;
+    lastR3ReportMs[SOURCE_BLE] = 0;
+    r3Sequence[SOURCE_BLE] = 0;
+    clearBleTxState();
     diagnostic("ble_disconnect", "epoch=" + String((unsigned long)bleConnectionEpoch));
     if (owner == SOURCE_BLE && !isLatchedState()) beginBrake("ble_disconnect");
     resetLineBuffer(bleLineBuffer);
@@ -1457,6 +1678,10 @@ void serviceBleEvents() {
     commandTimeoutMs = DEFAULT_LINK_TIMEOUT_MS;
     sonarReportIntervalMs[SOURCE_BLE] = 0;
     lastSonarReportMs[SOURCE_BLE] = 0;
+    r3ReportIntervalMs[SOURCE_BLE] = 0;
+    lastR3ReportMs[SOURCE_BLE] = 0;
+    r3Sequence[SOURCE_BLE] = 0;
+    clearBleTxState();
     readyPendingBle = false;
     resetLineBuffer(bleLineBuffer);
     diagnostic("ble_connect", "epoch=" + String((unsigned long)bleConnectionEpoch));
@@ -1499,7 +1724,7 @@ void pollUsb() {
 void serviceReadyNotifications() {
   if (!at8236Ready || isLatchedState()) return;
   if (readyPendingBle && bleClientConnected) {
-    sendToBle("r\n");
+    sendLine(SOURCE_BLE, "r\n");
     readyPendingBle = false;
   }
   if (readyPendingUsb) {
@@ -1680,6 +1905,7 @@ void setup() {
   setupBle();
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
   Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
+  Serial.println("R3_PROTOCOL,version=R3-V1,tx_chunk_bytes=20,range_gating=0");
   Serial.println("FAULT_RECOVERY,version=3,transient_auto_recover=1,overspeed_hard_ratio=4.00,overspeed_absolute_mmps=750");
 }
 
@@ -1697,5 +1923,7 @@ void loop() {
   serviceDriverRecovery();
   serviceIdleHold();
   serviceLegacyRangeTelemetry();
+  serviceR3Telemetry();
   serviceRangeDiagnostics();
+  serviceBleTx();
 }
