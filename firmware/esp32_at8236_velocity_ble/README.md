@@ -14,7 +14,7 @@
 - 上位机：本仓库 OpenBot Android 的 `RealCartFollowFragment`
 - 控制方式：Android 左右逻辑量 -> ESP32 四轮映射 -> AT8236 `$spd` mm/s 闭环
 - 当前只开放差速前进、后退、原地转向和弧线，不开放麦轮横移
-- 已集成中央 URM09-I²C 与左右 VL53L1X；传感器与本地停车必须先通过台架和架空联调
+- 已集成中央 URM09-I²C 与左右 VL53L1X；当前为仅日志模式，不参与运动许可或停车
 - 阶段 N 载物测试保持暂停；先完成 BLE 空载联调
 
 ## 接线与 AT8236 参数
@@ -57,12 +57,26 @@
 - `!Q`：仅 USB，打印状态
 - `!D,1` / `!D,0`：仅 USB，开关诊断日志
 
+本版根据实车出现的 `state=DRIVER_ERROR`、同时 `mspd_age_ms=52` 且四轮已经为零的
+日志，将“急停硬锁存”和“可恢复驱动瞬态故障”分开处理。启动时应额外看到：
+
+```text
+FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00
+```
+
+本版还修复了 `c14` 的超速误锁停。实车故障快照中目标为 240 mm/s，而四轮 `$MSPD`
+约为 419--438 mm/s；旧版 1.5 倍硬阈值只有 360 mm/s，因此会触发
+`last_fault_reason=overspeed_m1`。现在 1.5 倍仅产生一次 `overspeed_warning` 诊断，
+持续超过 3.0 倍动态阈值或 750 mm/s 绝对上限才进入不可恢复的 `DRIVER_ERROR`。
+这只修正安全判定的误报，不表示实际轮速已经准确跟随 240 mm/s；仍需根据实测车速检查
+AT8236 PID、编码器线数和轮径标定。
+
 最新的 `购物车Android-ESP32通信协议V2草案.md` 仍标记为 `V2-DRAFT-0.1`，并明确
 要求冻结前不实现 `m/d/g/a`。本固件因此只实现已兼容的 V1 `s` 能力；三路独立
 距离、状态和 age 目前通过 USB `!Q` / `RANGE` 诊断查看。Android 页面上的 V1
-数值只用于观察，ESP32 本地状态与停车逻辑才是安全依据。
+数值只用于观察，不能作为当前固件具有防撞能力的依据。
 
-## 三路测距与本地安全
+## 三路测距与仅日志模式
 
 I²C 总线为 100 kHz，全部模块按 3.3 V 供电：
 
@@ -77,16 +91,22 @@ I²C 总线为 100 kHz，全部模块按 3.3 V 供电：
 状态机，触发周期 120 ms。三路均维护 3 点有效值中值、原始设备状态、最后有效时间；
 超过 200 ms 无有效更新视为不可用，不能当作前方空旷。
 
-本地运动门控如下：
+当前统一开关为：
 
-- 前进要求中央读数有效且新鲜；中央 `<=300 mm` 制动，`>400 mm` 连续 3 个有效样本后解除。
-- 左转要求左 ToF 有效且新鲜；左侧 `<=200 mm` 制动，`>300 mm` 连续 3 帧后解除；右转镜像处理。
-- 风险解除只允许之后收到的新 `c` 命令生效，不回放停车前目标。
-- 后退没有后侧传感器覆盖，不能据此宣称具有后向防撞能力。
-- `REQUIRE_RANGE_SENSORS_FOR_MOTION=true` 为默认安全配置；传感器缺失/过期时，相应方向命令返回 `!ERR,sensor_*_unavailable`。
+```cpp
+static const bool RANGE_MOTION_GATING_ENABLED = false;
+```
+
+- 三路仍计算中央 300/400 mm、左右 200/300 mm 风险锁存，供日志观察和后续标定。
+- 开关关闭时，传感器缺失、过期或风险锁存均不得拒绝 `c` 命令，也不得调用制动。
+- `REQUIRE_RANGE_SENSORS_FOR_MOTION=true` 被保留为未来重新启用门控后的策略参数，当前不生效。
+- `c0,0`、急停、BLE 断连、心跳/运动刷新超时、驱动反馈故障和换向制动保持有效。
+- 当前没有前向、侧向或后向防撞保证，只能先架空车轮并在空旷场地测试。
 
 执行 `!D,1` 后，每 200 ms 输出一行 `RANGE`，包含三路 `*_mm`、`*_status`、
-`*_age_ms`、ToF 设备状态和 `risk`。`!Q` 也包含同类快照。完整验收步骤见
+`*_age_ms`、ToF 设备状态、`risk` 和 `gating=0`。启动日志包含
+`RANGE_MODE,mode=LOG_ONLY,gating=0`，`!Q` 包含 `range_motion_gating=0`，用于确认
+烧录版本。完整验收步骤见
 [传感器集成测试方案](传感器集成测试方案.md)。
 
 ### 当前逻辑量到实车速度的映射
@@ -162,8 +182,21 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
    也会停车，所以心跳不能让一条旧的非零运动永久生效。
 7. 直接换向不缓存反向命令。先制动并用新鲜 `$MSPD` 确认四轮低于 30 mm/s、持续
    400 ms；Android 在此期间仍会每 100 ms 重发，只有制动完成后收到的新帧才执行。
-8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或异常超速都会停车；驱动
-   反馈/制动故障使用 `$pwm:0` 锁存，防止错误 PID 继续驱动。
+8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或硬超速都会停车。硬超速采用
+   3.0 倍目标值的动态阈值，并受 300 mm/s 下限和 750 mm/s 绝对上限约束；1.5 倍只告警。
+9. 运动中 `$MSPD` 短暂丢失时先进入零速制动；制动遥测持续丢失 1500 ms，或制动
+   2 秒仍未确认静止时，进入可恢复 `DRIVER_ERROR`，发送 `$pwm:0`。只有 `$MSPD`
+   恢复且四轮连续低于 30 mm/s 达 1000 ms 后才回到 `READY_STOP`，原运动命令不会
+   重放，必须收到新的 `c` 命令才能再次运动。
+10. 反馈方向反号、持续硬超速、启动阶段驱动不就绪仍是不可自动恢复的硬故障；
+    `!S` 急停仍必须重启 ESP32，不能被普通驱动恢复逻辑清除。
+11. `DRIVER_ERROR` 和急停期间仍接受 `c0,0`、`h`、`s` 与只读查询；非零运动继续
+    拒绝。重复 `latched_stop` 错误按 500 ms 限频，避免错误通知占满 BLE 链路。
+
+`!Q` 会永久保留最近一次故障快照：`last_fault_reason`、`last_fault_at_ms`、
+`last_fault_recoverable`、`fault_target`、`fault_mspd`、`fault_mspd_age_ms` 和
+`driver_recovery_active`。即使故障已经恢复到 `READY_STOP`，这些字段也不会立即清除，
+便于事后定位首次触发原因。
 
 ## 编译与烧录
 
@@ -176,8 +209,10 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
 6. 上电后应看到 boot 文本；发送 `!D,1` 和 `!Q`，等待
    `state=READY_STOP,driver_ready=1` 后才允许运动；本版 `!Q` 还应包含
    `speed_legacy_input=14,speed_legacy_mmps=240,speed_full_input=21,`
-   `speed_cap_mmps=600`，并检查 `left_status/center_status/right_status`，用于确认
-   烧录的是本次提速与三路测距集成版本。
+   `speed_cap_mmps=600,overspeed_warning_ratio=1.50,overspeed_hard_ratio=3.00,`
+   `overspeed_absolute_mmps=750.00`，并检查 `last_fault_reason`、`driver_recovery_active`、
+   `left_status/center_status/right_status`，用于确认烧录的是本次故障恢复与三路测距
+   集成版本。
 
 无需 Arduino 工具链的静态契约检查可在仓库根目录执行：
 
@@ -277,6 +312,27 @@ ESP32 实际编译、I²C 实物测距或停车距离测试。
 3. 运动中发送递增的 `!S,1`，应进入 `EMERGENCY_STOP` 并下发 `$pwm:0`。
 4. 再发送任意 `c` 必须被拒绝；重启 ESP32 后才能恢复。
 
+### B3.1：可恢复驱动故障
+
+本项先架空四轮，必须保持 USB `!D,1` 日志和物理断电能力：
+
+1. 正常刷新非零 `c` 命令，临时中断 AT8236 TX 到 ESP32 RX，使 `$MSPD` 超过
+   500 ms 未更新；固件必须先记录 `brake_start,reason=telemetry_timeout_while_moving`，
+   目标轮速立即清零，不能继续运动。
+2. 在 1500 ms 内恢复串口且四轮已经静止，状态应通过正常 `BRAKING` 回到
+   `READY_STOP`，不得自动恢复故障前的非零轮速。
+3. 让遥测中断超过 1500 ms，应进入 `DRIVER_ERROR`，`!Q` 应显示
+   `last_fault_reason=mspd_lost_while_braking,last_fault_recoverable=1`。
+4. 恢复 `$MSPD` 后，只有四轮连续低于 30 mm/s 达 1000 ms 才能出现
+   `driver_recovered` 并回到 `READY_STOP`；恢复前非零 `c` 必须被拒绝。
+5. 回到 `READY_STOP` 后保持不发送命令，四轮必须继续为零；再发送一条新的非零
+   `c`，才允许重新运动。
+6. 在可控测试台模拟反馈反号或持续硬超速时，`last_fault_recoverable` 必须为 0，不能
+   自动恢复。反馈超过 1.5 倍动态阈值但未超过 3.0 倍/750 mm/s 硬阈值时，只应出现
+   `overspeed_warning`，不得进入 `DRIVER_ERROR`。不要在落地车辆上主动制造硬超速。
+7. 发送 `!S,<seq>` 后即使 `$MSPD` 新鲜且为零，也必须保持 `EMERGENCY_STOP`，只能
+   重启恢复。
+
 ### B4：空载落地
 
 1. 只在 B0-B3 全部通过后落地；空旷平整地面，测试者站在侧后方并可物理断电。
@@ -287,7 +343,7 @@ ESP32 实际编译、I²C 实物测距或停车距离测试。
 
 ## 通过条件与停止条件
 
-通过条件：握手稳定、方向全部正确、四轮无反号/超速、松键/断线/超时均能制动，
+通过条件：握手稳定、方向全部正确、四轮无反号/硬超速、松键/断线/超时均能制动，
 快速换向没有旧命令重放，落地直行和转弯与阶段 A-M 基本一致。
 
 立即停止并断电：任一轮方向错误、`$spd:0` 后仍持续加速、出现

@@ -16,6 +16,9 @@
     - Heartbeat freshness and motion-command freshness are checked separately.
     - Direct wheel-sign reversal is braked first and must be requested again
       after fresh MSPD confirms that all wheels have settled.
+    - A transient MSPD/braking fault holds zero and may recover only after
+      fresh MSPD confirms all four wheels stopped continuously for 1 second.
+    - Emergency stop, feedback sign mismatch and overspeed remain hard latches.
 */
 
 #include <Arduino.h>
@@ -61,9 +64,12 @@ static const unsigned long SENSOR_STALE_MS = 200;
 static const unsigned long MIN_SONAR_REPORT_MS = 50;
 static const unsigned long MAX_SONAR_REPORT_MS = 1000;
 
-// These thresholds implement the current local-safety proposal without adding
-// the un-frozen V2 d/g/a/m wire messages.  A cleared risk never replays an old
-// motion command: Android must send a fresh c command.
+// Range risks remain calculated and logged, but the current integration phase
+// is observation-only: sensor state must not reject commands or brake motion.
+// Set this true only after the range-safety policy and hardware tests are
+// explicitly approved.  REQUIRE_RANGE_SENSORS_FOR_MOTION is retained as the
+// future policy used when gating is enabled.
+static const bool RANGE_MOTION_GATING_ENABLED = false;
 static const int CENTER_STOP_MM = 300;
 static const int CENTER_CLEAR_MM = 400;
 static const int CORNER_STOP_MM = 200;
@@ -102,13 +108,21 @@ static const unsigned long MOTION_REFRESH_TIMEOUT_MS = 500;
 static const unsigned long DRIVER_BOOT_TIMEOUT_MS = 3000;
 static const unsigned long TELEMETRY_TIMEOUT_MS = 500;
 static const unsigned long BRAKE_PID_GRACE_MS = 600;
+static const unsigned long BRAKE_TELEMETRY_GRACE_MS = 1500;
 static const unsigned long BRAKE_TIMEOUT_MS = 2000;
 static const unsigned long ZERO_HOLD_MS = 400;
+static const unsigned long DRIVER_RECOVERY_ZERO_HOLD_MS = 1000;
 static const unsigned long IDLE_ZERO_REFRESH_MS = 200;
+static const unsigned long LATCHED_ERROR_REPORT_INTERVAL_MS = 500;
 static const float ZERO_SPEED_MMPS = 30.0f;
 static const float BRAKE_FALLBACK_SPEED_MMPS = 120.0f;
 static const float OVERSPEED_MIN_MMPS = 300.0f;
-static const float OVERSPEED_RATIO = 1.5f;
+// Existing AT8236 captures show about 419..476 MSPD at the c14 operating point.
+// The validation firmware therefore uses 3x as the hard runaway threshold.
+// The earlier 1.5x BLE threshold made the normal c14 response exceed 360 mm/s
+// and caused false permanent overspeed faults. Keep 1.5x as diagnostics only.
+static const float OVERSPEED_WARNING_RATIO = 1.5f;
+static const float OVERSPEED_RATIO = 3.0f;
 static const float OVERSPEED_ABSOLUTE_MMPS = 750.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
 
@@ -212,10 +226,22 @@ unsigned long lastMspdMs = 0;
 unsigned long lastDiagnosticMs = 0;
 unsigned long brakeStartedMs = 0;
 unsigned long zeroSinceMs = 0;
+unsigned long driverRecoveryZeroSinceMs = 0;
+unsigned long lastDriverRecoveryZeroMs = 0;
 unsigned long lastEmergencySequence = 0;
 unsigned long acceptedMotionCount = 0;
+unsigned long lastFaultAtMs = 0;
+long lastFaultMspdAgeMs = -1;
+bool lastFaultRecoverable = false;
+bool brakePidWarningReported = false;
+String lastFaultReason = "none";
+int lastFaultTargetMmps[4] = {0, 0, 0, 0};
+float lastFaultMspd[4] = {0, 0, 0, 0};
+unsigned long lastLatchedErrorReportMs[3] = {0, 0, 0};
 unsigned long feedbackMismatchSinceMs[4] = {0, 0, 0, 0};
 unsigned long overspeedSinceMs[4] = {0, 0, 0, 0};
+unsigned long overspeedWarningSinceMs[4] = {0, 0, 0, 0};
+bool overspeedWarningReported[4] = {false, false, false, false};
 unsigned long sonarReportIntervalMs[3] = {0, 0, 0};
 unsigned long lastSonarReportMs[3] = {0, 0, 0};
 unsigned long urm09TriggerMs = 0;
@@ -321,6 +347,8 @@ void clearMotionVectors() {
     currentWheelMmps[i] = 0;
     feedbackMismatchSinceMs[i] = 0;
     overspeedSinceMs[i] = 0;
+    overspeedWarningSinceMs[i] = 0;
+    overspeedWarningReported[i] = false;
   }
 }
 
@@ -602,6 +630,8 @@ void serviceRangeSensors() {
 }
 
 const char *motionRangeBlockReason(int left, int right) {
+  if (!RANGE_MOTION_GATING_ENABLED) return NULL;
+
   bool forward = left + right > 0;
   bool turningLeft = right > left;
   bool turningRight = left > right;
@@ -660,6 +690,7 @@ void serviceRangeDiagnostics() {
       now - lastRangeDiagnosticMs < DIAGNOSTIC_SAMPLE_MS) return;
   lastRangeDiagnosticMs = now;
   Serial.print("RANGE,ms="); Serial.print(now);
+  Serial.print(",gating="); Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
   Serial.print(",left_mm="); Serial.print(leftRange.filteredMm);
   Serial.print(",left_status="); Serial.print(rangeStatusName(effectiveRangeStatus(leftRange)));
   Serial.print(",left_age_ms="); Serial.print(rangeAgeMs(leftRange));
@@ -678,6 +709,7 @@ void serviceRangeDiagnostics() {
 }
 
 void serviceRangeMotionSafety() {
+  if (!RANGE_MOTION_GATING_ENABLED) return;
   if (systemState != MANUAL_ACTIVE) return;
   const char *reason = motionRangeBlockReason(logicalLeft, logicalRight);
   if (reason != NULL) beginBrake(reason);
@@ -702,12 +734,26 @@ void beginBrake(const String &reason) {
   sendZeroVelocity();
   brakeStartedMs = millis();
   zeroSinceMs = 0;
+  brakePidWarningReported = false;
   lastControlUpdateMs = brakeStartedMs;
   setState(BRAKING);
   diagnostic("brake_start", "reason=" + reason + ",mode=spd_zero_pid_hold");
 }
 
+void recordFaultContext(const String &reason, bool recoverable) {
+  unsigned long now = millis();
+  lastFaultReason = reason;
+  lastFaultAtMs = now;
+  lastFaultRecoverable = recoverable;
+  lastFaultMspdAgeMs = lastMspdMs == 0 ? -1L : (long)(now - lastMspdMs);
+  for (int i = 0; i < 4; ++i) {
+    lastFaultTargetMmps[i] = targetWheelMmps[i];
+    lastFaultMspd[i] = latestMspd[i];
+  }
+}
+
 void enterLatchedFault(SystemState faultState, const String &reason) {
+  recordFaultContext(reason, false);
   clearMotionVectors();
   releaseOwner();
   sendZeroVelocity();
@@ -715,6 +761,35 @@ void enterLatchedFault(SystemState faultState, const String &reason) {
   disablePwmOutput();
   setState(faultState);
   diagnostic("latched_stop", "reason=" + reason + ",mode=pwm_zero");
+}
+
+void enterDriverFault(const String &reason, bool recoverable) {
+  recordFaultContext(reason, recoverable);
+  clearMotionVectors();
+  releaseOwner();
+  sendZeroVelocity();
+  delay(20);
+  disablePwmOutput();
+  driverRecoveryZeroSinceMs = 0;
+  lastDriverRecoveryZeroMs = 0;
+  for (int i = 0; i < 3; ++i) lastLatchedErrorReportMs[i] = 0;
+  setState(DRIVER_ERROR);
+  diagnostic("driver_fault",
+             "reason=" + reason +
+             ",recoverable=" + String(recoverable ? 1 : 0) +
+             ",mspd_age_ms=" + String(lastFaultMspdAgeMs));
+}
+
+void reportLatchedStop(ControlSource source) {
+  int index = (int)source;
+  unsigned long now = millis();
+  if (index < SOURCE_BLE || index > SOURCE_USB) return;
+  if (lastLatchedErrorReportMs[index] != 0 &&
+      now - lastLatchedErrorReportMs[index] < LATCHED_ERROR_REPORT_INTERVAL_MS) {
+    return;
+  }
+  lastLatchedErrorReportMs[index] = now;
+  reportError(source, "latched_stop");
 }
 
 bool parseLongStrict(const String &text, long &value) {
@@ -851,6 +926,8 @@ bool feedbackSafe() {
     if (targetWheelMmps[i] == 0) {
       feedbackMismatchSinceMs[i] = 0;
       overspeedSinceMs[i] = 0;
+      overspeedWarningSinceMs[i] = 0;
+      overspeedWarningReported[i] = false;
       continue;
     }
 
@@ -860,12 +937,31 @@ bool feedbackSafe() {
     if (signMismatch) {
       if (feedbackMismatchSinceMs[i] == 0) feedbackMismatchSinceMs[i] = now;
       if (now - feedbackMismatchSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
-        enterLatchedFault(DRIVER_ERROR,
-                          "feedback_sign_mismatch_m" + String(i + 1));
+        enterDriverFault("feedback_sign_mismatch_m" + String(i + 1), false);
         return false;
       }
     } else {
       feedbackMismatchSinceMs[i] = 0;
+    }
+
+    float warningLimit = min(
+      OVERSPEED_ABSOLUTE_MMPS,
+      max(OVERSPEED_MIN_MMPS,
+          absFloat((float)targetWheelMmps[i]) * OVERSPEED_WARNING_RATIO));
+    if (absFloat(measured) > warningLimit) {
+      if (overspeedWarningSinceMs[i] == 0) overspeedWarningSinceMs[i] = now;
+      if (!overspeedWarningReported[i] &&
+          now - overspeedWarningSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
+        overspeedWarningReported[i] = true;
+        diagnostic("overspeed_warning",
+                   "wheel=" + String(i + 1) +
+                   ",target=" + String(targetWheelMmps[i]) +
+                   ",mspd=" + String(measured, 2) +
+                   ",limit=" + String(warningLimit, 2));
+      }
+    } else {
+      overspeedWarningSinceMs[i] = 0;
+      overspeedWarningReported[i] = false;
     }
 
     float limit = min(
@@ -875,7 +971,7 @@ bool feedbackSafe() {
     if (absFloat(measured) > limit) {
       if (overspeedSinceMs[i] == 0) overspeedSinceMs[i] = now;
       if (now - overspeedSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
-        enterLatchedFault(DRIVER_ERROR, "overspeed_m" + String(i + 1));
+        enterDriverFault("overspeed_m" + String(i + 1), false);
         return false;
       }
     } else {
@@ -901,6 +997,34 @@ void printStatus() {
   Serial.print(",speed_legacy_mmps="); Serial.print(LEGACY_FULL_SPEED_MMPS);
   Serial.print(",speed_full_input="); Serial.print(PROTOCOL_FULL_SPEED_INPUT);
   Serial.print(",speed_cap_mmps="); Serial.print(MAX_WHEEL_SPEED_MMPS);
+  Serial.print(",overspeed_warning_ratio=");
+  Serial.print(OVERSPEED_WARNING_RATIO, 2);
+  Serial.print(",overspeed_hard_ratio="); Serial.print(OVERSPEED_RATIO, 2);
+  Serial.print(",overspeed_absolute_mmps=");
+  Serial.print(OVERSPEED_ABSOLUTE_MMPS, 2);
+  Serial.print(",range_motion_gating=");
+  Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
+  Serial.print(",last_fault_reason="); Serial.print(lastFaultReason);
+  Serial.print(",last_fault_at_ms=");
+  Serial.print(lastFaultAtMs ? (long)lastFaultAtMs : -1L);
+  Serial.print(",last_fault_recoverable=");
+  Serial.print(lastFaultRecoverable ? 1 : 0);
+  Serial.print(",driver_recovery_active=");
+  Serial.print(systemState == DRIVER_ERROR && lastFaultRecoverable ? 1 : 0);
+  Serial.print(",fault_mspd_age_ms="); Serial.print(lastFaultMspdAgeMs);
+  Serial.print(",fault_target=");
+  for (int i = 0; i < 4; ++i) {
+    Serial.print(lastFaultTargetMmps[i]);
+    Serial.print(i == 3 ? ',' : ':');
+  }
+  Serial.print("fault_mspd=");
+  for (int i = 0; i < 4; ++i) {
+    Serial.print(lastFaultMspd[i], 2);
+    Serial.print(i == 3 ? ',' : ':');
+  }
+  Serial.print("recovery_zero_age_ms=");
+  Serial.print(driverRecoveryZeroSinceMs
+                 ? (long)(millis() - driverRecoveryZeroSinceMs) : -1L);
   Serial.print(",logical="); Serial.print(logicalLeft); Serial.print(',');
   Serial.print(logicalRight);
   Serial.print(",target=");
@@ -957,12 +1081,19 @@ void handleMotionCommand(ControlSource source, const String &line) {
     } else if (systemState == READY_STOP) {
       sendZeroVelocity();
       lastIdleZeroMs = now;
+    } else if (systemState == DRIVER_ERROR && lastFaultRecoverable) {
+      // A recoverable driver hold uses fresh zero-speed frames to verify that
+      // the velocity channel and feedback have both become healthy again.
+      sendZeroVelocity();
+    } else if (isLatchedState()) {
+      // Hard faults and emergency stop must remain in disabled-PWM mode.
+      disablePwmOutput();
     }
     return;
   }
 
   if (isLatchedState()) {
-    reportError(source, "latched_stop");
+    reportLatchedStop(source);
     return;
   }
   if (!at8236Ready || systemState == BOOT_HOLD) {
@@ -1088,7 +1219,8 @@ void processCommand(ControlSource source, String line) {
   line.trim();
   if (line.length() == 0) return;
 
-  // Once emergency stop is latched, only read-only queries are accepted.
+  // Queries, heartbeat/telemetry setup and c0 remain safe during a stop latch;
+  // non-zero motion is still rejected by handleMotionCommand().
   if (line == "f") {
     handleFeatureQuery(source);
   } else if (line == "!Q") {
@@ -1098,14 +1230,14 @@ void processCommand(ControlSource source, String line) {
     handleDiagnostics(source, line);
   } else if (line.startsWith("!S")) {
     handleEmergency(source, line);
-  } else if (isLatchedState()) {
-    reportError(source, "latched_stop");
   } else if (line.charAt(0) == 'c') {
     handleMotionCommand(source, line);
   } else if (line.charAt(0) == 'h') {
     handleHeartbeat(source, line);
   } else if (line.charAt(0) == 's') {
     handleSonarFrequency(source, line);
+  } else if (isLatchedState()) {
+    reportLatchedStop(source);
   } else {
     reportError(source, "unknown_command");
     if (owner == source && systemState == MANUAL_ACTIVE) beginBrake("protocol_error");
@@ -1340,7 +1472,7 @@ void serviceTimeouts() {
   unsigned long now = millis();
 
   if (!at8236Ready && now - bootStartMs > DRIVER_BOOT_TIMEOUT_MS) {
-    enterLatchedFault(DRIVER_ERROR, "driver_boot_timeout");
+    enterDriverFault("driver_boot_timeout", false);
     return;
   }
 
@@ -1355,7 +1487,7 @@ void serviceTimeouts() {
     return;
   }
   if (!mspdFresh()) {
-    enterLatchedFault(DRIVER_ERROR, "telemetry_timeout_while_moving");
+    beginBrake("telemetry_timeout_while_moving");
   }
 }
 
@@ -1403,16 +1535,23 @@ void serviceBrake() {
   }
 
   if (!mspdFresh()) {
-    enterLatchedFault(DRIVER_ERROR, "mspd_lost_while_braking");
+    zeroSinceMs = 0;
+    if (now - brakeStartedMs >= BRAKE_TELEMETRY_GRACE_MS) {
+      enterDriverFault("mspd_lost_while_braking", true);
+    }
     return;
   }
 
   if (now - brakeStartedMs >= BRAKE_PID_GRACE_MS) {
     for (int i = 0; i < 4; ++i) {
       if (absFloat(latestMspd[i]) > BRAKE_FALLBACK_SPEED_MMPS) {
-        enterLatchedFault(DRIVER_ERROR,
-                          "pid_brake_failed_m" + String(i + 1));
-        return;
+        if (!brakePidWarningReported) {
+          brakePidWarningReported = true;
+          diagnostic("brake_slow",
+                     "wheel=" + String(i + 1) +
+                     ",mspd=" + String(latestMspd[i], 2));
+        }
+        break;
       }
     }
   }
@@ -1429,8 +1568,45 @@ void serviceBrake() {
   }
 
   if (now - brakeStartedMs >= BRAKE_TIMEOUT_MS) {
-    enterLatchedFault(DRIVER_ERROR, "brake_timeout");
+    enterDriverFault("brake_timeout", true);
   }
+}
+
+void serviceDriverRecovery() {
+  if (systemState != DRIVER_ERROR || !lastFaultRecoverable) return;
+  unsigned long now = millis();
+
+  // A recoverable driver fault is still a stop state. Keep refreshing zero and
+  // never replay the command that was active when the fault occurred.
+  if (lastDriverRecoveryZeroMs == 0 ||
+      now - lastDriverRecoveryZeroMs >= IDLE_ZERO_REFRESH_MS) {
+    lastDriverRecoveryZeroMs = now;
+    sendZeroVelocity();
+  }
+
+  if (!mspdFresh() || !allWheelsNearZero()) {
+    driverRecoveryZeroSinceMs = 0;
+    return;
+  }
+
+  if (driverRecoveryZeroSinceMs == 0) {
+    driverRecoveryZeroSinceMs = now;
+    diagnostic("driver_recovery_zero",
+               "reason=" + lastFaultReason + ",started=1");
+    return;
+  }
+  if (now - driverRecoveryZeroSinceMs < DRIVER_RECOVERY_ZERO_HOLD_MS) return;
+
+  clearMotionVectors();
+  releaseOwner();
+  sendZeroVelocity();
+  driverRecoveryZeroSinceMs = 0;
+  lastDriverRecoveryZeroMs = 0;
+  for (int i = 0; i < 3; ++i) lastLatchedErrorReportMs[i] = 0;
+  setState(READY_STOP);
+  diagnostic("driver_recovered",
+             "reason=" + lastFaultReason +
+             ",zero_hold_ms=" + String(DRIVER_RECOVERY_ZERO_HOLD_MS));
 }
 
 void serviceIdleHold() {
@@ -1454,6 +1630,8 @@ void setup() {
   configureAT8236();
   setupBle();
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
+  Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
+  Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00");
 }
 
 void loop() {
@@ -1467,6 +1645,7 @@ void loop() {
   serviceTimeouts();
   serviceActiveMotion();
   serviceBrake();
+  serviceDriverRecovery();
   serviceIdleHold();
   serviceLegacyRangeTelemetry();
   serviceRangeDiagnostics();

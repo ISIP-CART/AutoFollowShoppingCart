@@ -26,6 +26,14 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertIsNotNone(match, f"missing numeric constant {name}")
         return int(match.group(1), 0)
 
+    def float_constant(self, name: str) -> float:
+        match = re.search(
+            rf"static const float {name} = (\d+(?:\.\d+)?)f;",
+            self.source,
+        )
+        self.assertIsNotNone(match, f"missing float constant {name}")
+        return float(match.group(1))
+
     def test_merge_is_resolved(self):
         self.assertNotIn("<<<<<<<", self.source)
         self.assertNotIn(">>>>>>>", self.source)
@@ -46,7 +54,33 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertEqual(self.constant("CORNER_STOP_MM"), 200)
         self.assertEqual(self.constant("CORNER_CLEAR_MM"), 300)
         self.assertEqual(self.constant("RISK_CLEAR_VALID_SAMPLES"), 3)
+        self.assertEqual(self.constant("BRAKE_TELEMETRY_GRACE_MS"), 1500)
+        self.assertEqual(self.constant("DRIVER_RECOVERY_ZERO_HOLD_MS"), 1000)
+        self.assertIn("RANGE_MOTION_GATING_ENABLED = false", self.source)
         self.assertIn("REQUIRE_RANGE_SENSORS_FOR_MOTION = true", self.source)
+
+    def test_sensor_motion_gating_is_bypassed_at_both_entries(self):
+        block_reason = re.search(
+            r"const char \*motionRangeBlockReason\(.*?\n\}",
+            self.source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(block_reason)
+        self.assertRegex(
+            block_reason.group(0),
+            r"\{\s*if \(!RANGE_MOTION_GATING_ENABLED\) return NULL;",
+        )
+
+        active_safety = re.search(
+            r"void serviceRangeMotionSafety\(\) \{.*?\n\}",
+            self.source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(active_safety)
+        self.assertRegex(
+            active_safety.group(0),
+            r"\{\s*if \(!RANGE_MOTION_GATING_ENABLED\) return;",
+        )
 
     def test_v1_sonar_capability_is_wired_end_to_end(self):
         self.assertIn('sendLine(source, "fCART_AT8236:s:\\n")', self.source)
@@ -69,6 +103,106 @@ class FirmwareContractTest(unittest.TestCase):
         loop = loop_match.group(1)
         self.assertLess(loop.index("serviceRangeSensors();"), loop.index("serviceBleEvents();"))
         self.assertLess(loop.index("serviceRangeMotionSafety();"), loop.index("serviceActiveMotion();"))
+        self.assertLess(loop.index("serviceBrake();"), loop.index("serviceDriverRecovery();"))
+        self.assertIn("serviceLegacyRangeTelemetry();", loop)
+        self.assertIn("serviceRangeDiagnostics();", loop)
+
+    def test_non_range_safety_paths_remain_present(self):
+        required_fragments = (
+            'beginBrake("control_zero")',
+            'line.startsWith("!S")',
+            'beginBrake("link_timeout")',
+            'beginBrake("motion_timeout")',
+            'enterDriverFault("driver_boot_timeout", false)',
+            'beginBrake("direct_reversal")',
+            'beginBrake("ble_disconnect")',
+            'enterLatchedFault(EMERGENCY_STOP',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+    def test_transient_driver_faults_stop_then_recover_from_fresh_zero_mspd(self):
+        required_fragments = (
+            'beginBrake("telemetry_timeout_while_moving")',
+            'enterDriverFault("mspd_lost_while_braking", true)',
+            'enterDriverFault("brake_timeout", true)',
+            "void serviceDriverRecovery()",
+            "!mspdFresh() || !allWheelsNearZero()",
+            "DRIVER_RECOVERY_ZERO_HOLD_MS",
+            "setState(READY_STOP)",
+            'diagnostic("driver_recovered"',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+        self.assertNotIn(
+            'enterLatchedFault(DRIVER_ERROR, "telemetry_timeout_while_moving")',
+            self.source,
+        )
+        self.assertNotIn(
+            'enterLatchedFault(DRIVER_ERROR, "mspd_lost_while_braking")',
+            self.source,
+        )
+
+    def test_feedback_direction_and_overspeed_remain_hard_faults(self):
+        self.assertIn(
+            'enterDriverFault("feedback_sign_mismatch_m" + String(i + 1), false)',
+            self.source,
+        )
+        self.assertIn(
+            'enterDriverFault("overspeed_m" + String(i + 1), false)',
+            self.source,
+        )
+        self.assertIn("Hard faults and emergency stop must remain in disabled-PWM mode", self.source)
+        self.assertIn("disablePwmOutput();", self.source)
+
+    def test_c14_captured_mspd_is_warning_not_false_hard_overspeed(self):
+        warning_ratio = self.float_constant("OVERSPEED_WARNING_RATIO")
+        hard_ratio = self.float_constant("OVERSPEED_RATIO")
+        minimum = self.float_constant("OVERSPEED_MIN_MMPS")
+        absolute = self.float_constant("OVERSPEED_ABSOLUTE_MMPS")
+
+        def limit(target: float, ratio: float) -> float:
+            return min(absolute, max(minimum, abs(target) * ratio))
+
+        captured_mspd = 437.92
+        self.assertEqual(warning_ratio, 1.5)
+        self.assertEqual(hard_ratio, 3.0)
+        self.assertGreater(captured_mspd, limit(240, warning_ratio))
+        self.assertLess(captured_mspd, limit(240, hard_ratio))
+        self.assertLess(captured_mspd, limit(223, hard_ratio))
+        self.assertEqual(limit(600, hard_ratio), 750.0)
+        self.assertIn('diagnostic("overspeed_warning"', self.source)
+
+    def test_fault_context_is_persistent_and_queryable(self):
+        required_fragments = (
+            "recordFaultContext(reason, recoverable)",
+            'Serial.print(",last_fault_reason=")',
+            'Serial.print(",last_fault_at_ms=")',
+            'Serial.print(",last_fault_recoverable=")',
+            'Serial.print(",driver_recovery_active=")',
+            'Serial.print(",fault_mspd_age_ms=")',
+            'Serial.print(",fault_target=")',
+            'Serial.print("fault_mspd=")',
+            'Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00")',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+    def test_range_observation_outputs_remain_present(self):
+        required_fragments = (
+            'line == "!D,1"',
+            'Serial.print("RANGE,ms=")',
+            'Serial.print(",left_status=")',
+            'Serial.print(",center_status=")',
+            'Serial.print(",right_status=")',
+            'Serial.print(",risk=")',
+            'Serial.print(",gating=")',
+            'Serial.print(",range_motion_gating=")',
+            'Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0")',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
 
     def test_recovery_drops_pre_stale_filter_history(self):
         self.assertIn("now - reading.lastValidMs > SENSOR_STALE_MS", self.source)
