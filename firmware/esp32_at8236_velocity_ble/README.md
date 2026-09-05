@@ -61,8 +61,15 @@
 日志，将“急停硬锁存”和“可恢复驱动瞬态故障”分开处理。启动时应额外看到：
 
 ```text
-FAULT_RECOVERY,version=1,transient_auto_recover=1
+FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00
 ```
+
+本版还修复了 `c14` 的超速误锁停。实车故障快照中目标为 240 mm/s，而四轮 `$MSPD`
+约为 419--438 mm/s；旧版 1.5 倍硬阈值只有 360 mm/s，因此会触发
+`last_fault_reason=overspeed_m1`。现在 1.5 倍仅产生一次 `overspeed_warning` 诊断，
+持续超过 3.0 倍动态阈值或 750 mm/s 绝对上限才进入不可恢复的 `DRIVER_ERROR`。
+这只修正安全判定的误报，不表示实际轮速已经准确跟随 240 mm/s；仍需根据实测车速检查
+AT8236 PID、编码器线数和轮径标定。
 
 最新的 `购物车Android-ESP32通信协议V2草案.md` 仍标记为 `V2-DRAFT-0.1`，并明确
 要求冻结前不实现 `m/d/g/a`。本固件因此只实现已兼容的 V1 `s` 能力；三路独立
@@ -175,12 +182,13 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
    也会停车，所以心跳不能让一条旧的非零运动永久生效。
 7. 直接换向不缓存反向命令。先制动并用新鲜 `$MSPD` 确认四轮低于 30 mm/s、持续
    400 ms；Android 在此期间仍会每 100 ms 重发，只有制动完成后收到的新帧才执行。
-8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或异常超速都会停车。
+8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或硬超速都会停车。硬超速采用
+   3.0 倍目标值的动态阈值，并受 300 mm/s 下限和 750 mm/s 绝对上限约束；1.5 倍只告警。
 9. 运动中 `$MSPD` 短暂丢失时先进入零速制动；制动遥测持续丢失 1500 ms，或制动
    2 秒仍未确认静止时，进入可恢复 `DRIVER_ERROR`，发送 `$pwm:0`。只有 `$MSPD`
    恢复且四轮连续低于 30 mm/s 达 1000 ms 后才回到 `READY_STOP`，原运动命令不会
    重放，必须收到新的 `c` 命令才能再次运动。
-10. 反馈方向反号、异常超速、启动阶段驱动不就绪仍是不可自动恢复的硬故障；
+10. 反馈方向反号、持续硬超速、启动阶段驱动不就绪仍是不可自动恢复的硬故障；
     `!S` 急停仍必须重启 ESP32，不能被普通驱动恢复逻辑清除。
 11. `DRIVER_ERROR` 和急停期间仍接受 `c0,0`、`h`、`s` 与只读查询；非零运动继续
     拒绝。重复 `latched_stop` 错误按 500 ms 限频，避免错误通知占满 BLE 链路。
@@ -201,7 +209,8 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
 6. 上电后应看到 boot 文本；发送 `!D,1` 和 `!Q`，等待
    `state=READY_STOP,driver_ready=1` 后才允许运动；本版 `!Q` 还应包含
    `speed_legacy_input=14,speed_legacy_mmps=240,speed_full_input=21,`
-   `speed_cap_mmps=600`，并检查 `last_fault_reason`、`driver_recovery_active`、
+   `speed_cap_mmps=600,overspeed_warning_ratio=1.50,overspeed_hard_ratio=3.00,`
+   `overspeed_absolute_mmps=750.00`，并检查 `last_fault_reason`、`driver_recovery_active`、
    `left_status/center_status/right_status`，用于确认烧录的是本次故障恢复与三路测距
    集成版本。
 
@@ -318,7 +327,9 @@ ESP32 实际编译、I²C 实物测距或停车距离测试。
    `driver_recovered` 并回到 `READY_STOP`；恢复前非零 `c` 必须被拒绝。
 5. 回到 `READY_STOP` 后保持不发送命令，四轮必须继续为零；再发送一条新的非零
    `c`，才允许重新运动。
-6. 人为制造反馈反号或超速时，`last_fault_recoverable` 必须为 0，不能自动恢复。
+6. 在可控测试台模拟反馈反号或持续硬超速时，`last_fault_recoverable` 必须为 0，不能
+   自动恢复。反馈超过 1.5 倍动态阈值但未超过 3.0 倍/750 mm/s 硬阈值时，只应出现
+   `overspeed_warning`，不得进入 `DRIVER_ERROR`。不要在落地车辆上主动制造硬超速。
 7. 发送 `!S,<seq>` 后即使 `$MSPD` 新鲜且为零，也必须保持 `EMERGENCY_STOP`，只能
    重启恢复。
 
@@ -332,7 +343,7 @@ ESP32 实际编译、I²C 实物测距或停车距离测试。
 
 ## 通过条件与停止条件
 
-通过条件：握手稳定、方向全部正确、四轮无反号/超速、松键/断线/超时均能制动，
+通过条件：握手稳定、方向全部正确、四轮无反号/硬超速、松键/断线/超时均能制动，
 快速换向没有旧命令重放，落地直行和转弯与阶段 A-M 基本一致。
 
 立即停止并断电：任一轮方向错误、`$spd:0` 后仍持续加速、出现

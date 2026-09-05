@@ -117,7 +117,12 @@ static const unsigned long LATCHED_ERROR_REPORT_INTERVAL_MS = 500;
 static const float ZERO_SPEED_MMPS = 30.0f;
 static const float BRAKE_FALLBACK_SPEED_MMPS = 120.0f;
 static const float OVERSPEED_MIN_MMPS = 300.0f;
-static const float OVERSPEED_RATIO = 1.5f;
+// Existing AT8236 captures show about 419..476 MSPD at the c14 operating point.
+// The validation firmware therefore uses 3x as the hard runaway threshold.
+// The earlier 1.5x BLE threshold made the normal c14 response exceed 360 mm/s
+// and caused false permanent overspeed faults. Keep 1.5x as diagnostics only.
+static const float OVERSPEED_WARNING_RATIO = 1.5f;
+static const float OVERSPEED_RATIO = 3.0f;
 static const float OVERSPEED_ABSOLUTE_MMPS = 750.0f;
 static const unsigned long FEEDBACK_FAULT_CONFIRM_MS = 120;
 
@@ -235,6 +240,8 @@ float lastFaultMspd[4] = {0, 0, 0, 0};
 unsigned long lastLatchedErrorReportMs[3] = {0, 0, 0};
 unsigned long feedbackMismatchSinceMs[4] = {0, 0, 0, 0};
 unsigned long overspeedSinceMs[4] = {0, 0, 0, 0};
+unsigned long overspeedWarningSinceMs[4] = {0, 0, 0, 0};
+bool overspeedWarningReported[4] = {false, false, false, false};
 unsigned long sonarReportIntervalMs[3] = {0, 0, 0};
 unsigned long lastSonarReportMs[3] = {0, 0, 0};
 unsigned long urm09TriggerMs = 0;
@@ -340,6 +347,8 @@ void clearMotionVectors() {
     currentWheelMmps[i] = 0;
     feedbackMismatchSinceMs[i] = 0;
     overspeedSinceMs[i] = 0;
+    overspeedWarningSinceMs[i] = 0;
+    overspeedWarningReported[i] = false;
   }
 }
 
@@ -917,6 +926,8 @@ bool feedbackSafe() {
     if (targetWheelMmps[i] == 0) {
       feedbackMismatchSinceMs[i] = 0;
       overspeedSinceMs[i] = 0;
+      overspeedWarningSinceMs[i] = 0;
+      overspeedWarningReported[i] = false;
       continue;
     }
 
@@ -931,6 +942,26 @@ bool feedbackSafe() {
       }
     } else {
       feedbackMismatchSinceMs[i] = 0;
+    }
+
+    float warningLimit = min(
+      OVERSPEED_ABSOLUTE_MMPS,
+      max(OVERSPEED_MIN_MMPS,
+          absFloat((float)targetWheelMmps[i]) * OVERSPEED_WARNING_RATIO));
+    if (absFloat(measured) > warningLimit) {
+      if (overspeedWarningSinceMs[i] == 0) overspeedWarningSinceMs[i] = now;
+      if (!overspeedWarningReported[i] &&
+          now - overspeedWarningSinceMs[i] >= FEEDBACK_FAULT_CONFIRM_MS) {
+        overspeedWarningReported[i] = true;
+        diagnostic("overspeed_warning",
+                   "wheel=" + String(i + 1) +
+                   ",target=" + String(targetWheelMmps[i]) +
+                   ",mspd=" + String(measured, 2) +
+                   ",limit=" + String(warningLimit, 2));
+      }
+    } else {
+      overspeedWarningSinceMs[i] = 0;
+      overspeedWarningReported[i] = false;
     }
 
     float limit = min(
@@ -966,6 +997,11 @@ void printStatus() {
   Serial.print(",speed_legacy_mmps="); Serial.print(LEGACY_FULL_SPEED_MMPS);
   Serial.print(",speed_full_input="); Serial.print(PROTOCOL_FULL_SPEED_INPUT);
   Serial.print(",speed_cap_mmps="); Serial.print(MAX_WHEEL_SPEED_MMPS);
+  Serial.print(",overspeed_warning_ratio=");
+  Serial.print(OVERSPEED_WARNING_RATIO, 2);
+  Serial.print(",overspeed_hard_ratio="); Serial.print(OVERSPEED_RATIO, 2);
+  Serial.print(",overspeed_absolute_mmps=");
+  Serial.print(OVERSPEED_ABSOLUTE_MMPS, 2);
   Serial.print(",range_motion_gating=");
   Serial.print(RANGE_MOTION_GATING_ENABLED ? 1 : 0);
   Serial.print(",last_fault_reason="); Serial.print(lastFaultReason);
@@ -1595,7 +1631,7 @@ void setup() {
   setupBle();
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
   Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
-  Serial.println("FAULT_RECOVERY,version=1,transient_auto_recover=1");
+  Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00");
 }
 
 void loop() {

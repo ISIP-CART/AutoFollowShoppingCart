@@ -26,6 +26,14 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertIsNotNone(match, f"missing numeric constant {name}")
         return int(match.group(1), 0)
 
+    def float_constant(self, name: str) -> float:
+        match = re.search(
+            rf"static const float {name} = (\d+(?:\.\d+)?)f;",
+            self.source,
+        )
+        self.assertIsNotNone(match, f"missing float constant {name}")
+        return float(match.group(1))
+
     def test_merge_is_resolved(self):
         self.assertNotIn("<<<<<<<", self.source)
         self.assertNotIn(">>>>>>>", self.source)
@@ -148,6 +156,24 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertIn("Hard faults and emergency stop must remain in disabled-PWM mode", self.source)
         self.assertIn("disablePwmOutput();", self.source)
 
+    def test_c14_captured_mspd_is_warning_not_false_hard_overspeed(self):
+        warning_ratio = self.float_constant("OVERSPEED_WARNING_RATIO")
+        hard_ratio = self.float_constant("OVERSPEED_RATIO")
+        minimum = self.float_constant("OVERSPEED_MIN_MMPS")
+        absolute = self.float_constant("OVERSPEED_ABSOLUTE_MMPS")
+
+        def limit(target: float, ratio: float) -> float:
+            return min(absolute, max(minimum, abs(target) * ratio))
+
+        captured_mspd = 437.92
+        self.assertEqual(warning_ratio, 1.5)
+        self.assertEqual(hard_ratio, 3.0)
+        self.assertGreater(captured_mspd, limit(240, warning_ratio))
+        self.assertLess(captured_mspd, limit(240, hard_ratio))
+        self.assertLess(captured_mspd, limit(223, hard_ratio))
+        self.assertEqual(limit(600, hard_ratio), 750.0)
+        self.assertIn('diagnostic("overspeed_warning"', self.source)
+
     def test_fault_context_is_persistent_and_queryable(self):
         required_fragments = (
             "recordFaultContext(reason, recoverable)",
@@ -158,7 +184,7 @@ class FirmwareContractTest(unittest.TestCase):
             'Serial.print(",fault_mspd_age_ms=")',
             'Serial.print(",fault_target=")',
             'Serial.print("fault_mspd=")',
-            'Serial.println("FAULT_RECOVERY,version=1,transient_auto_recover=1")',
+            'Serial.println("FAULT_RECOVERY,version=2,transient_auto_recover=1,overspeed_hard_ratio=3.00")',
         )
         for fragment in required_fragments:
             self.assertIn(fragment, self.source)
