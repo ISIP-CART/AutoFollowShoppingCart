@@ -263,6 +263,6 @@ git push -u origin docs/your-branch-name
 
 ## 当前仓库状态提示
 
-当前仓库已经包含文档规划、ReID PC 研究工作区和 OpenBot Android 子仓库指针。`dev/OpenBot/android` 中已实现 Human Cart Simulator、PersonCropCollector、PersonSequenceCollector、阶段 A 行为层、阶段 B ReID 首版接入和阶段 C 目标轨迹/身份信念层；最新 Android 侧还包含 track/bbox gate 修正、恢复后 relock、非 locked 空间支持门控和诊断日志开关。硬件底盘真实控制仍未接通。
+当前仓库已经包含文档规划、ReID PC 研究工作区和 OpenBot Android 子仓库指针。`dev/OpenBot/android` 中已实现 Human Cart Simulator、PersonCropCollector、PersonSequenceCollector、阶段 A 行为层、阶段 B ReID 首版接入和阶段 C 目标轨迹/身份信念层；最新 Android 侧还包含 track/bbox gate 修正、恢复后 relock、非 locked 空间支持门控和诊断日志开关。真实车 BLE 遥控与自动跟随已接通，Android V1 测距当前只显示和记录；ESP32 仍可能拒绝运动。2026-09-05 转向修复采用实测中心误差、差速前进优先和短脉冲原地对准，BLE 失败后自动重新扫描同地址再有限重连；新版实车效果仍须复测。
 
 后续若继续引入 Android 代码、固件、BOM、测试记录或模型转换脚本，应继续遵守上面的架构主线、隐私边界和子仓库提交流程。尤其注意不要提交本地采集图片、模型权重、TFLite 测试模型或 PC 输出结果。
