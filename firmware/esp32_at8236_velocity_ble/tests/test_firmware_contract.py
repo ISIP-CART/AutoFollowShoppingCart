@@ -46,6 +46,8 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertEqual(self.constant("CORNER_STOP_MM"), 200)
         self.assertEqual(self.constant("CORNER_CLEAR_MM"), 300)
         self.assertEqual(self.constant("RISK_CLEAR_VALID_SAMPLES"), 3)
+        self.assertEqual(self.constant("BRAKE_TELEMETRY_GRACE_MS"), 1500)
+        self.assertEqual(self.constant("DRIVER_RECOVERY_ZERO_HOLD_MS"), 1000)
         self.assertIn("RANGE_MOTION_GATING_ENABLED = false", self.source)
         self.assertIn("REQUIRE_RANGE_SENSORS_FOR_MOTION = true", self.source)
 
@@ -93,6 +95,7 @@ class FirmwareContractTest(unittest.TestCase):
         loop = loop_match.group(1)
         self.assertLess(loop.index("serviceRangeSensors();"), loop.index("serviceBleEvents();"))
         self.assertLess(loop.index("serviceRangeMotionSafety();"), loop.index("serviceActiveMotion();"))
+        self.assertLess(loop.index("serviceBrake();"), loop.index("serviceDriverRecovery();"))
         self.assertIn("serviceLegacyRangeTelemetry();", loop)
         self.assertIn("serviceRangeDiagnostics();", loop)
 
@@ -102,9 +105,60 @@ class FirmwareContractTest(unittest.TestCase):
             'line.startsWith("!S")',
             'beginBrake("link_timeout")',
             'beginBrake("motion_timeout")',
-            'enterLatchedFault(DRIVER_ERROR',
+            'enterDriverFault("driver_boot_timeout", false)',
             'beginBrake("direct_reversal")',
             'beginBrake("ble_disconnect")',
+            'enterLatchedFault(EMERGENCY_STOP',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+    def test_transient_driver_faults_stop_then_recover_from_fresh_zero_mspd(self):
+        required_fragments = (
+            'beginBrake("telemetry_timeout_while_moving")',
+            'enterDriverFault("mspd_lost_while_braking", true)',
+            'enterDriverFault("brake_timeout", true)',
+            "void serviceDriverRecovery()",
+            "!mspdFresh() || !allWheelsNearZero()",
+            "DRIVER_RECOVERY_ZERO_HOLD_MS",
+            "setState(READY_STOP)",
+            'diagnostic("driver_recovered"',
+        )
+        for fragment in required_fragments:
+            self.assertIn(fragment, self.source)
+
+        self.assertNotIn(
+            'enterLatchedFault(DRIVER_ERROR, "telemetry_timeout_while_moving")',
+            self.source,
+        )
+        self.assertNotIn(
+            'enterLatchedFault(DRIVER_ERROR, "mspd_lost_while_braking")',
+            self.source,
+        )
+
+    def test_feedback_direction_and_overspeed_remain_hard_faults(self):
+        self.assertIn(
+            'enterDriverFault("feedback_sign_mismatch_m" + String(i + 1), false)',
+            self.source,
+        )
+        self.assertIn(
+            'enterDriverFault("overspeed_m" + String(i + 1), false)',
+            self.source,
+        )
+        self.assertIn("Hard faults and emergency stop must remain in disabled-PWM mode", self.source)
+        self.assertIn("disablePwmOutput();", self.source)
+
+    def test_fault_context_is_persistent_and_queryable(self):
+        required_fragments = (
+            "recordFaultContext(reason, recoverable)",
+            'Serial.print(",last_fault_reason=")',
+            'Serial.print(",last_fault_at_ms=")',
+            'Serial.print(",last_fault_recoverable=")',
+            'Serial.print(",driver_recovery_active=")',
+            'Serial.print(",fault_mspd_age_ms=")',
+            'Serial.print(",fault_target=")',
+            'Serial.print("fault_mspd=")',
+            'Serial.println("FAULT_RECOVERY,version=1,transient_auto_recover=1")',
         )
         for fragment in required_fragments:
             self.assertIn(fragment, self.source)

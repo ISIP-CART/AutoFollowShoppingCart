@@ -57,6 +57,13 @@
 - `!Q`：仅 USB，打印状态
 - `!D,1` / `!D,0`：仅 USB，开关诊断日志
 
+本版根据实车出现的 `state=DRIVER_ERROR`、同时 `mspd_age_ms=52` 且四轮已经为零的
+日志，将“急停硬锁存”和“可恢复驱动瞬态故障”分开处理。启动时应额外看到：
+
+```text
+FAULT_RECOVERY,version=1,transient_auto_recover=1
+```
+
 最新的 `购物车Android-ESP32通信协议V2草案.md` 仍标记为 `V2-DRAFT-0.1`，并明确
 要求冻结前不实现 `m/d/g/a`。本固件因此只实现已兼容的 V1 `s` 能力；三路独立
 距离、状态和 age 目前通过 USB `!Q` / `RANGE` 诊断查看。Android 页面上的 V1
@@ -168,8 +175,20 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
    也会停车，所以心跳不能让一条旧的非零运动永久生效。
 7. 直接换向不缓存反向命令。先制动并用新鲜 `$MSPD` 确认四轮低于 30 mm/s、持续
    400 ms；Android 在此期间仍会每 100 ms 重发，只有制动完成后收到的新帧才执行。
-8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或异常超速都会停车；驱动
-   反馈/制动故障使用 `$pwm:0` 锁存，防止错误 PID 继续驱动。
+8. BLE 断开、接收队列溢出、运动时遥测丢失、反馈反号或异常超速都会停车。
+9. 运动中 `$MSPD` 短暂丢失时先进入零速制动；制动遥测持续丢失 1500 ms，或制动
+   2 秒仍未确认静止时，进入可恢复 `DRIVER_ERROR`，发送 `$pwm:0`。只有 `$MSPD`
+   恢复且四轮连续低于 30 mm/s 达 1000 ms 后才回到 `READY_STOP`，原运动命令不会
+   重放，必须收到新的 `c` 命令才能再次运动。
+10. 反馈方向反号、异常超速、启动阶段驱动不就绪仍是不可自动恢复的硬故障；
+    `!S` 急停仍必须重启 ESP32，不能被普通驱动恢复逻辑清除。
+11. `DRIVER_ERROR` 和急停期间仍接受 `c0,0`、`h`、`s` 与只读查询；非零运动继续
+    拒绝。重复 `latched_stop` 错误按 500 ms 限频，避免错误通知占满 BLE 链路。
+
+`!Q` 会永久保留最近一次故障快照：`last_fault_reason`、`last_fault_at_ms`、
+`last_fault_recoverable`、`fault_target`、`fault_mspd`、`fault_mspd_age_ms` 和
+`driver_recovery_active`。即使故障已经恢复到 `READY_STOP`，这些字段也不会立即清除，
+便于事后定位首次触发原因。
 
 ## 编译与烧录
 
@@ -182,8 +201,9 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
 6. 上电后应看到 boot 文本；发送 `!D,1` 和 `!Q`，等待
    `state=READY_STOP,driver_ready=1` 后才允许运动；本版 `!Q` 还应包含
    `speed_legacy_input=14,speed_legacy_mmps=240,speed_full_input=21,`
-   `speed_cap_mmps=600`，并检查 `left_status/center_status/right_status`，用于确认
-   烧录的是本次提速与三路测距集成版本。
+   `speed_cap_mmps=600`，并检查 `last_fault_reason`、`driver_recovery_active`、
+   `left_status/center_status/right_status`，用于确认烧录的是本次故障恢复与三路测距
+   集成版本。
 
 无需 Arduino 工具链的静态契约检查可在仓库根目录执行：
 
@@ -282,6 +302,25 @@ ESP32 实际编译、I²C 实物测距或停车距离测试。
 2. 停止全部 BLE 写入，最晚应在 750 ms 左右因 `link_timeout` 停止。
 3. 运动中发送递增的 `!S,1`，应进入 `EMERGENCY_STOP` 并下发 `$pwm:0`。
 4. 再发送任意 `c` 必须被拒绝；重启 ESP32 后才能恢复。
+
+### B3.1：可恢复驱动故障
+
+本项先架空四轮，必须保持 USB `!D,1` 日志和物理断电能力：
+
+1. 正常刷新非零 `c` 命令，临时中断 AT8236 TX 到 ESP32 RX，使 `$MSPD` 超过
+   500 ms 未更新；固件必须先记录 `brake_start,reason=telemetry_timeout_while_moving`，
+   目标轮速立即清零，不能继续运动。
+2. 在 1500 ms 内恢复串口且四轮已经静止，状态应通过正常 `BRAKING` 回到
+   `READY_STOP`，不得自动恢复故障前的非零轮速。
+3. 让遥测中断超过 1500 ms，应进入 `DRIVER_ERROR`，`!Q` 应显示
+   `last_fault_reason=mspd_lost_while_braking,last_fault_recoverable=1`。
+4. 恢复 `$MSPD` 后，只有四轮连续低于 30 mm/s 达 1000 ms 才能出现
+   `driver_recovered` 并回到 `READY_STOP`；恢复前非零 `c` 必须被拒绝。
+5. 回到 `READY_STOP` 后保持不发送命令，四轮必须继续为零；再发送一条新的非零
+   `c`，才允许重新运动。
+6. 人为制造反馈反号或超速时，`last_fault_recoverable` 必须为 0，不能自动恢复。
+7. 发送 `!S,<seq>` 后即使 `$MSPD` 新鲜且为零，也必须保持 `EMERGENCY_STOP`，只能
+   重启恢复。
 
 ### B4：空载落地
 
