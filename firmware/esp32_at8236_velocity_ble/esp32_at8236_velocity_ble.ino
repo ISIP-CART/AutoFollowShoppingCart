@@ -56,6 +56,13 @@ static const unsigned long URM09_TRIGGER_PERIOD_MS = 120;
 static const unsigned long URM09_MEASUREMENT_WAIT_MS = 100;
 static const unsigned long TOF_CONTINUOUS_PERIOD_MS = 50;
 static const uint32_t TOF_TIMING_BUDGET_US = 33000;
+// Polling dataReady() on every loop iteration needlessly floods the shared I2C
+// bus, especially while BLE is active.  A 5 ms poll is still ten times faster
+// than the configured ranging period.
+static const unsigned long TOF_POLL_INTERVAL_MS = 5;
+static const unsigned long TOF_RESULT_TIMEOUT_MS = 1000;
+static const unsigned long TOF_RECOVERY_RETRY_MS = 5000;
+static const unsigned long TOF_RESET_HOLD_MS = 10;
 static const uint16_t TOF_MIN_VALID_MM = 40;
 static const uint16_t TOF_MAX_VALID_MM = 1300;
 static const uint16_t URM09_MIN_VALID_MM = 20;
@@ -176,6 +183,13 @@ enum RangeStatus {
   RANGE_NOT_PRESENT = 5
 };
 
+enum TofRecoveryState {
+  TOF_RECOVERY_IDLE = 0,
+  TOF_RECOVERY_HOLD_RESET,
+  TOF_RECOVERY_INIT_LEFT,
+  TOF_RECOVERY_INIT_RIGHT
+};
+
 struct RangeReading {
   bool present;
   int rawMm;
@@ -187,6 +201,12 @@ struct RangeReading {
   int history[3];
   uint8_t historyCount;
   uint8_t historyIndex;
+};
+
+struct TofRuntime {
+  unsigned long lastPollMs;
+  unsigned long initializedMs;
+  uint8_t busStatus;
 };
 
 struct LineBuffer {
@@ -205,6 +225,13 @@ BLECharacteristic *txCharacteristic = NULL;
 QueueHandle_t bleRxQueue = NULL;
 VL53L1X leftTof;
 VL53L1X rightTof;
+TofRuntime leftTofRuntime = {0, 0, 0};
+TofRuntime rightTofRuntime = {0, 0, 0};
+TofRecoveryState tofRecoveryState = TOF_RECOVERY_IDLE;
+unsigned long tofRecoveryStateMs = 0;
+unsigned long lastTofRecoveryAttemptMs = 0;
+unsigned long tofRecoveryCount = 0;
+String lastTofRecoveryReason = "none";
 
 String bleTxPriorityQueue[BLE_TX_PRIORITY_QUEUE_LEN];
 size_t bleTxPriorityHead = 0;
@@ -520,6 +547,10 @@ long rangeAgeMs(const RangeReading &reading) {
   return reading.lastValidMs == 0 ? -1L : (long)(millis() - reading.lastValidMs);
 }
 
+long rangeSampleAgeMs(const RangeReading &reading) {
+  return reading.lastSampleMs == 0 ? -1L : (long)(millis() - reading.lastSampleMs);
+}
+
 bool rangeFreshAndValid(const RangeReading &reading) {
   return reading.present && reading.status == RANGE_VALID &&
          reading.lastValidMs != 0 && millis() - reading.lastValidMs <= SENSOR_STALE_MS;
@@ -567,6 +598,31 @@ void recordInvalidRange(RangeReading &reading, RangeStatus status, int rawMm,
   reading.status = status;
   reading.deviceStatus = deviceStatus;
   reading.lastSampleMs = millis();
+}
+
+void recordTofBusError(RangeReading &reading, TofRuntime &runtime,
+                       uint8_t busStatus) {
+  reading.rawMm = -1;
+  reading.status = RANGE_BUS_ERROR;
+  reading.deviceStatus = 255;
+  runtime.busStatus = busStatus;
+  // lastSampleMs intentionally remains unchanged.  A failed I2C transaction is
+  // not a completed range result and must let the acquisition watchdog expire.
+}
+
+void resetTofReading(RangeReading &reading, TofRuntime &runtime) {
+  reading.present = false;
+  reading.rawMm = -1;
+  reading.filteredMm = -1;
+  reading.status = RANGE_NOT_PRESENT;
+  reading.deviceStatus = 0;
+  reading.lastSampleMs = 0;
+  reading.lastValidMs = 0;
+  reading.historyCount = 0;
+  reading.historyIndex = 0;
+  runtime.lastPollMs = 0;
+  runtime.initializedMs = millis();
+  runtime.busStatus = 0;
 }
 
 void updateRiskLatch(const RangeReading &reading, int stopMm, int clearMm,
@@ -618,7 +674,13 @@ bool i2cReadRegisters(uint8_t address, uint8_t reg, uint8_t *data, size_t length
 }
 
 bool initializeTof(VL53L1X &sensor, int xshutPin, uint8_t address,
-                   RangeReading &reading, const char *label) {
+                   RangeReading &reading, TofRuntime &runtime,
+                   const char *label, const char *eventName) {
+  resetTofReading(reading, runtime);
+  // XSHUT resets the physical device to 0x29, but the Pololu object retains
+  // the previously assigned 0x2A/0x2B address.  Recreate its software state so
+  // init() talks to the device at the default address after a runtime reset.
+  sensor = VL53L1X();
   pinMode(xshutPin, INPUT);  // high impedance releases the board's XSHUT pull-up
   delay(10);
   sensor.setTimeout(200);
@@ -627,23 +689,40 @@ bool initializeTof(VL53L1X &sensor, int xshutPin, uint8_t address,
     digitalWrite(xshutPin, LOW);
     reading.present = false;
     reading.status = RANGE_NOT_PRESENT;
-    Serial.print("RANGE_BOOT,sensor="); Serial.print(label);
+    runtime.busStatus = sensor.last_status;
+    Serial.print(eventName); Serial.print(",sensor="); Serial.print(label);
     Serial.println(",status=NOT_PRESENT");
     return false;
   }
   sensor.setAddress(address);
-  if (!sensor.setDistanceMode(VL53L1X::Short) ||
+  if (sensor.last_status != 0 || !i2cProbe(address) ||
+      !sensor.setDistanceMode(VL53L1X::Short) ||
       !sensor.setMeasurementTimingBudget(TOF_TIMING_BUDGET_US)) {
-    reading.present = true;
+    runtime.busStatus = sensor.last_status;
+    pinMode(xshutPin, OUTPUT);
+    digitalWrite(xshutPin, LOW);
+    reading.present = false;
     reading.status = RANGE_BUS_ERROR;
-    Serial.print("RANGE_BOOT,sensor="); Serial.print(label);
+    Serial.print(eventName); Serial.print(",sensor="); Serial.print(label);
     Serial.println(",status=CONFIG_ERROR");
     return false;
   }
   sensor.startContinuous(TOF_CONTINUOUS_PERIOD_MS);
+  if (sensor.last_status != 0) {
+    runtime.busStatus = sensor.last_status;
+    pinMode(xshutPin, OUTPUT);
+    digitalWrite(xshutPin, LOW);
+    reading.present = false;
+    reading.status = RANGE_BUS_ERROR;
+    Serial.print(eventName); Serial.print(",sensor="); Serial.print(label);
+    Serial.println(",status=START_ERROR");
+    return false;
+  }
   reading.present = true;
   reading.status = RANGE_STALE;
-  Serial.print("RANGE_BOOT,sensor="); Serial.print(label);
+  runtime.initializedMs = millis();
+  runtime.busStatus = 0;
+  Serial.print(eventName); Serial.print(",sensor="); Serial.print(label);
   Serial.print(",address=0x"); Serial.print(address, HEX);
   Serial.println(",status=READY");
   return true;
@@ -671,9 +750,9 @@ void initializeRangeSensors() {
   }
 
   initializeTof(leftTof, LEFT_TOF_XSHUT_PIN, LEFT_TOF_ADDRESS,
-                leftRange, "LEFT_VL53L1X");
+                leftRange, leftTofRuntime, "LEFT_VL53L1X", "RANGE_BOOT");
   initializeTof(rightTof, RIGHT_TOF_XSHUT_PIN, RIGHT_TOF_ADDRESS,
-                rightRange, "RIGHT_VL53L1X");
+                rightRange, rightTofRuntime, "RIGHT_VL53L1X", "RANGE_BOOT");
 }
 
 RangeStatus tofFailureStatus(uint8_t deviceStatus) {
@@ -683,13 +762,28 @@ RangeStatus tofFailureStatus(uint8_t deviceStatus) {
            ? RANGE_INVALID : SIGNAL_INVALID;
 }
 
-void serviceTof(VL53L1X &sensor, RangeReading &reading,
+void serviceTof(VL53L1X &sensor, RangeReading &reading, TofRuntime &runtime,
                 int stopMm, int clearMm, bool &riskLatched,
                 uint8_t &clearSamples) {
-  if (!reading.present || !sensor.dataReady()) return;
+  if (!reading.present) return;
+  unsigned long now = millis();
+  if (runtime.lastPollMs != 0 &&
+      now - runtime.lastPollMs < TOF_POLL_INTERVAL_MS) return;
+  runtime.lastPollMs = now;
+
+  bool ready = sensor.dataReady();
+  runtime.busStatus = sensor.last_status;
+  if (runtime.busStatus != 0) {
+    recordTofBusError(reading, runtime, runtime.busStatus);
+    updateRiskLatch(reading, stopMm, clearMm, riskLatched, clearSamples);
+    return;
+  }
+  if (!ready) return;
+
   uint16_t distanceMm = sensor.read(false);
-  if (sensor.timeoutOccurred()) {
-    recordInvalidRange(reading, RANGE_BUS_ERROR, -1, 255);
+  runtime.busStatus = sensor.last_status;
+  if (sensor.timeoutOccurred() || runtime.busStatus != 0) {
+    recordTofBusError(reading, runtime, runtime.busStatus);
   } else {
     uint8_t deviceStatus = sensor.ranging_data.range_status;
     if (deviceStatus != 0) {
@@ -702,6 +796,90 @@ void serviceTof(VL53L1X &sensor, RangeReading &reading,
     }
   }
   updateRiskLatch(reading, stopMm, clearMm, riskLatched, clearSamples);
+}
+
+const char *tofRecoveryStateName(TofRecoveryState state) {
+  switch (state) {
+    case TOF_RECOVERY_IDLE: return "IDLE";
+    case TOF_RECOVERY_HOLD_RESET: return "HOLD_RESET";
+    case TOF_RECOVERY_INIT_LEFT: return "INIT_LEFT";
+    case TOF_RECOVERY_INIT_RIGHT: return "INIT_RIGHT";
+    default: return "UNKNOWN";
+  }
+}
+
+bool tofResultTimedOut(const RangeReading &reading, const TofRuntime &runtime,
+                       unsigned long now) {
+  unsigned long referenceMs = reading.lastSampleMs != 0
+                                ? reading.lastSampleMs : runtime.initializedMs;
+  return referenceMs != 0 && now - referenceMs >= TOF_RESULT_TIMEOUT_MS;
+}
+
+void beginTofRecovery(const String &reason) {
+  unsigned long now = millis();
+  lastTofRecoveryAttemptMs = now;
+  tofRecoveryCount++;
+  lastTofRecoveryReason = reason;
+
+  bool defaultPresent = i2cProbe(0x29);
+  bool leftPresent = i2cProbe(LEFT_TOF_ADDRESS);
+  bool rightPresent = i2cProbe(RIGHT_TOF_ADDRESS);
+  Serial.print("RANGE_RECOVERY,event=start,count=");
+  Serial.print(tofRecoveryCount);
+  Serial.print(",reason="); Serial.print(reason);
+  Serial.print(",probe_0x29="); Serial.print(defaultPresent ? 1 : 0);
+  Serial.print(",probe_0x2a="); Serial.print(leftPresent ? 1 : 0);
+  Serial.print(",probe_0x2b="); Serial.println(rightPresent ? 1 : 0);
+
+  pinMode(LEFT_TOF_XSHUT_PIN, OUTPUT);
+  pinMode(RIGHT_TOF_XSHUT_PIN, OUTPUT);
+  digitalWrite(LEFT_TOF_XSHUT_PIN, LOW);
+  digitalWrite(RIGHT_TOF_XSHUT_PIN, LOW);
+  resetTofReading(leftRange, leftTofRuntime);
+  resetTofReading(rightRange, rightTofRuntime);
+  tofRecoveryState = TOF_RECOVERY_HOLD_RESET;
+  tofRecoveryStateMs = now;
+}
+
+void serviceTofRecovery() {
+  unsigned long now = millis();
+  if (tofRecoveryState == TOF_RECOVERY_IDLE) {
+    if (systemState != READY_STOP) return;
+    if (lastTofRecoveryAttemptMs != 0 &&
+        now - lastTofRecoveryAttemptMs < TOF_RECOVERY_RETRY_MS) return;
+    bool leftTimedOut = tofResultTimedOut(leftRange, leftTofRuntime, now);
+    bool rightTimedOut = tofResultTimedOut(rightRange, rightTofRuntime, now);
+    if (!leftTimedOut && !rightTimedOut) return;
+    String reason = leftTimedOut && rightTimedOut ? "both_result_timeout"
+                    : leftTimedOut ? "left_result_timeout"
+                                   : "right_result_timeout";
+    beginTofRecovery(reason);
+    return;
+  }
+
+  // Sensor initialization can wait behind motion.  The motor loop remains
+  // responsive and no potentially blocking VL53L1X init runs while moving.
+  if (systemState != READY_STOP) return;
+
+  if (tofRecoveryState == TOF_RECOVERY_HOLD_RESET) {
+    if (now - tofRecoveryStateMs < TOF_RESET_HOLD_MS) return;
+    tofRecoveryState = TOF_RECOVERY_INIT_LEFT;
+  }
+  if (tofRecoveryState == TOF_RECOVERY_INIT_LEFT) {
+    initializeTof(leftTof, LEFT_TOF_XSHUT_PIN, LEFT_TOF_ADDRESS,
+                  leftRange, leftTofRuntime, "LEFT_VL53L1X", "RANGE_RECOVERY");
+    tofRecoveryState = TOF_RECOVERY_INIT_RIGHT;
+    return;
+  }
+  if (tofRecoveryState == TOF_RECOVERY_INIT_RIGHT) {
+    initializeTof(rightTof, RIGHT_TOF_XSHUT_PIN, RIGHT_TOF_ADDRESS,
+                  rightRange, rightTofRuntime, "RIGHT_VL53L1X", "RANGE_RECOVERY");
+    tofRecoveryState = TOF_RECOVERY_IDLE;
+    Serial.print("RANGE_RECOVERY,event=complete,count=");
+    Serial.print(tofRecoveryCount);
+    Serial.print(",left_ready="); Serial.print(leftRange.present ? 1 : 0);
+    Serial.print(",right_ready="); Serial.println(rightRange.present ? 1 : 0);
+  }
 }
 
 void serviceUrm09() {
@@ -744,10 +922,15 @@ void serviceUrm09() {
 }
 
 void serviceRangeSensors() {
-  serviceTof(leftTof, leftRange, CORNER_STOP_MM, CORNER_CLEAR_MM,
-             leftRiskLatched, leftClearSamples);
-  serviceTof(rightTof, rightRange, CORNER_STOP_MM, CORNER_CLEAR_MM,
-             rightRiskLatched, rightClearSamples);
+  if (tofRecoveryState == TOF_RECOVERY_IDLE) {
+    serviceTof(leftTof, leftRange, leftTofRuntime,
+               CORNER_STOP_MM, CORNER_CLEAR_MM,
+               leftRiskLatched, leftClearSamples);
+    serviceTof(rightTof, rightRange, rightTofRuntime,
+               CORNER_STOP_MM, CORNER_CLEAR_MM,
+               rightRiskLatched, rightClearSamples);
+  }
+  serviceTofRecovery();
   serviceUrm09();
 }
 
@@ -881,6 +1064,8 @@ void serviceRangeDiagnostics() {
   Serial.print(",left_status="); Serial.print(rangeStatusName(effectiveRangeStatus(leftRange)));
   Serial.print(",left_age_ms="); Serial.print(rangeAgeMs(leftRange));
   Serial.print(",left_device_status="); Serial.print(leftRange.deviceStatus);
+  Serial.print(",left_sample_age_ms="); Serial.print(rangeSampleAgeMs(leftRange));
+  Serial.print(",left_bus_status="); Serial.print(leftTofRuntime.busStatus);
   Serial.print(",center_mm="); Serial.print(centerRange.filteredMm);
   Serial.print(",center_status="); Serial.print(rangeStatusName(effectiveRangeStatus(centerRange)));
   Serial.print(",center_age_ms="); Serial.print(rangeAgeMs(centerRange));
@@ -888,6 +1073,11 @@ void serviceRangeDiagnostics() {
   Serial.print(",right_status="); Serial.print(rangeStatusName(effectiveRangeStatus(rightRange)));
   Serial.print(",right_age_ms="); Serial.print(rangeAgeMs(rightRange));
   Serial.print(",right_device_status="); Serial.print(rightRange.deviceStatus);
+  Serial.print(",right_sample_age_ms="); Serial.print(rangeSampleAgeMs(rightRange));
+  Serial.print(",right_bus_status="); Serial.print(rightTofRuntime.busStatus);
+  Serial.print(",tof_recovery_state=");
+  Serial.print(tofRecoveryStateName(tofRecoveryState));
+  Serial.print(",tof_recovery_count="); Serial.print(tofRecoveryCount);
   Serial.print(",risk=");
   Serial.print(leftRiskLatched ? 'L' : '-');
   Serial.print(centerRiskLatched ? 'C' : '-');
@@ -1274,12 +1464,20 @@ void printStatus() {
   Serial.print(",left_mm="); Serial.print(leftRange.filteredMm);
   Serial.print(",left_status="); Serial.print(rangeStatusName(effectiveRangeStatus(leftRange)));
   Serial.print(",left_age_ms="); Serial.print(rangeAgeMs(leftRange));
+  Serial.print(",left_sample_age_ms="); Serial.print(rangeSampleAgeMs(leftRange));
+  Serial.print(",left_bus_status="); Serial.print(leftTofRuntime.busStatus);
   Serial.print(",center_mm="); Serial.print(centerRange.filteredMm);
   Serial.print(",center_status="); Serial.print(rangeStatusName(effectiveRangeStatus(centerRange)));
   Serial.print(",center_age_ms="); Serial.print(rangeAgeMs(centerRange));
   Serial.print(",right_mm="); Serial.print(rightRange.filteredMm);
   Serial.print(",right_status="); Serial.print(rangeStatusName(effectiveRangeStatus(rightRange)));
   Serial.print(",right_age_ms="); Serial.print(rangeAgeMs(rightRange));
+  Serial.print(",right_sample_age_ms="); Serial.print(rangeSampleAgeMs(rightRange));
+  Serial.print(",right_bus_status="); Serial.print(rightTofRuntime.busStatus);
+  Serial.print(",tof_recovery_state=");
+  Serial.print(tofRecoveryStateName(tofRecoveryState));
+  Serial.print(",tof_recovery_count="); Serial.print(tofRecoveryCount);
+  Serial.print(",tof_recovery_reason="); Serial.print(lastTofRecoveryReason);
   Serial.print(",range_risk=");
   Serial.print(leftRiskLatched ? 'L' : '-');
   Serial.print(centerRiskLatched ? 'C' : '-');
@@ -1906,6 +2104,7 @@ void setup() {
   Serial.println("ESP32 AT8236 velocity BLE firmware booting");
   Serial.println("RANGE_MODE,mode=LOG_ONLY,gating=0");
   Serial.println("R3_PROTOCOL,version=R3-V1,tx_chunk_bytes=20,range_gating=0");
+  Serial.println("TOF_RECOVERY,version=1,poll_ms=5,result_timeout_ms=1000,retry_ms=5000,stationary_only=1");
   Serial.println("FAULT_RECOVERY,version=3,transient_auto_recover=1,overspeed_hard_ratio=4.00,overspeed_absolute_mmps=750");
 }
 
