@@ -321,6 +321,57 @@ class FirmwareContractTest(unittest.TestCase):
         self.assertIn("now - reading.lastValidMs > SENSOR_STALE_MS", self.source)
         self.assertIn("reading.historyCount = 0", self.source)
 
+    def test_tof_runtime_recovery_is_rate_limited_grouped_and_stationary(self):
+        self.assertEqual(self.constant("TOF_POLL_INTERVAL_MS"), 5)
+        self.assertEqual(self.constant("TOF_RESULT_TIMEOUT_MS"), 1000)
+        self.assertEqual(self.constant("TOF_RECOVERY_RETRY_MS"), 5000)
+        self.assertEqual(self.constant("TOF_RESET_HOLD_MS"), 10)
+
+        service_start = self.source.index("void serviceTofRecovery()")
+        service_end = self.source.index("\nvoid serviceUrm09()", service_start)
+        body = self.source[service_start:service_end]
+        self.assertGreaterEqual(body.count("systemState != READY_STOP"), 2)
+        self.assertIn("TOF_RECOVERY_RETRY_MS", body)
+        self.assertIn("tofResultTimedOut(leftRange", body)
+        self.assertIn("tofResultTimedOut(rightRange", body)
+
+        restart_start = self.source.index("void beginTofRecovery(")
+        restart_end = self.source.index("\nvoid serviceTofRecovery()", restart_start)
+        restart_body = self.source[restart_start:restart_end]
+        for fragment in (
+            "digitalWrite(LEFT_TOF_XSHUT_PIN, LOW)",
+            "digitalWrite(RIGHT_TOF_XSHUT_PIN, LOW)",
+            "i2cProbe(0x29)",
+            'Serial.print("RANGE_RECOVERY,event=start,count=")',
+        ):
+            self.assertIn(fragment, restart_body)
+        self.assertIn("sensor = VL53L1X();", self.source)
+
+    def test_tof_i2c_failures_are_observable_and_not_counted_as_results(self):
+        service_start = self.source.index("void serviceTof(")
+        service_end = self.source.index("\nconst char *tofRecoveryStateName", service_start)
+        body = self.source[service_start:service_end]
+        self.assertIn("now - runtime.lastPollMs < TOF_POLL_INTERVAL_MS", body)
+        self.assertGreaterEqual(body.count("sensor.last_status"), 2)
+        self.assertGreaterEqual(body.count("recordTofBusError"), 2)
+
+        bus_error = re.search(
+            r"void recordTofBusError\(.*?\n\}", self.source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(bus_error)
+        self.assertNotIn("lastSampleMs =", bus_error.group(0))
+        for fragment in (
+            'Serial.print(",left_sample_age_ms=")',
+            'Serial.print(",left_bus_status=")',
+            'Serial.print(",right_sample_age_ms=")',
+            'Serial.print(",right_bus_status=")',
+            'Serial.print(",tof_recovery_state=")',
+            'Serial.print(",tof_recovery_count=")',
+            'Serial.println("TOF_RECOVERY,version=1,poll_ms=5,result_timeout_ms=1000,retry_ms=5000,stationary_only=1")',
+        ):
+            self.assertIn(fragment, self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

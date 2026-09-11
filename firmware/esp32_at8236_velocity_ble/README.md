@@ -124,6 +124,25 @@ I²C 总线为 100 kHz，全部模块按 3.3 V 供电：
 状态机，触发周期 120 ms。三路均维护 3 点有效值中值、原始设备状态、最后有效时间；
 超过 200 ms 无有效更新视为不可用，不能当作前方空旷。
 
+ToF 的 `dataReady()` 轮询限制为每路最多每 5 ms 一次，避免 BLE 活跃时在共享总线上
+无意义地连续查询。固件另外监视“最后一次完成的测距结果”：任一路连续 1000 ms 没有
+结果，车辆处于 `READY_STOP` 时会把两路 XSHUT 一起拉低，再按左 `0x2A`、右 `0x2B`
+重新初始化。必须成组恢复，因为掉电或复位后的模块会回到共同默认地址 `0x29`；单独改址
+可能与另一只模块冲突。恢复失败后每 5 s 重试，运动中暂停初始化，且恢复过程不改变
+`RANGE_MOTION_GATING_ENABLED=false` 的仅日志策略。
+
+恢复会无条件输出 `RANGE_RECOVERY,event=start/.../complete`。启动时还会输出：
+
+```text
+TOF_RECOVERY,version=1,poll_ms=5,result_timeout_ms=1000,retry_ms=5000,stationary_only=1
+```
+
+`RANGE` 与 `!Q` 新增 `left/right_sample_age_ms`（最后一次完整测距结果年龄）、
+`left/right_bus_status`（Pololu 库最后一次 I²C 状态）、`tof_recovery_state` 和
+`tof_recovery_count`；`!Q` 还保留最近一次 `tof_recovery_reason`。因此 `*_age_ms`
+持续增长但 `*_sample_age_ms` 较小时表示传感器仍在返回无效质量数据，两个年龄都增长
+才表示测距采集已经停摆。
+
 当前统一开关为：
 
 ```cpp
@@ -137,7 +156,7 @@ static const bool RANGE_MOTION_GATING_ENABLED = false;
 - 当前没有前向、侧向或后向防撞保证，只能先架空车轮并在空旷场地测试。
 
 执行 `!D,1` 后，每 200 ms 输出一行 `RANGE`，包含三路 `*_mm`、`*_status`、
-`*_age_ms`、ToF 设备状态、`risk` 和 `gating=0`。启动日志包含
+`*_age_ms`、ToF 设备/I²C 状态、恢复状态、`risk` 和 `gating=0`。启动日志包含
 `RANGE_MODE,mode=LOG_ONLY,gating=0`，`!Q` 包含 `range_motion_gating=0`，用于确认
 烧录版本。完整验收步骤见
 [传感器集成测试方案](传感器集成测试方案.md)。
@@ -246,8 +265,8 @@ Android 实车页面当前使用：前进 `14,14`、后退 `-12,-12`、转向 `-
    `speed_cap_mmps=600,overspeed_warning_ratio=1.50,overspeed_hard_ratio=4.00,`
    `overspeed_absolute_mmps=750.00,overspeed_settle_ms=500`，并检查
    `last_fault_reason`、`fault_target`、`fault_current`、`driver_recovery_active`、
-   `left_status/center_status/right_status`，用于确认烧录的是本次故障恢复与三路测距
-   集成版本。
+   `left_status/center_status/right_status`、`tof_recovery_state=IDLE` 和
+   `tof_recovery_count`，用于确认烧录的是本次故障恢复与三路测距集成版本。
 
 无需 Arduino 工具链的静态契约检查可在仓库根目录执行：
 
